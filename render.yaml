@@ -1,0 +1,40 @@
+# Render blueprint — persistent Node Web Service (NOT serverless).
+# A long-lived process is required: node-cron must keep ticking for 48 hours
+# after an agent is initialized, which a serverless/edge deployment cannot do.
+services:
+  - type: web
+    name: autonomous-persona-agent
+    runtime: node
+    plan: free
+    region: oregon
+
+    # Installs backend deps, then installs + builds the React/Vite frontend into
+    # client/dist, which the Express server serves as static assets.
+    buildCommand: npm install && npm run build
+
+    # Single process: Express serves the API, the built frontend, and the cron loop.
+    startCommand: npm start
+
+    healthCheckPath: /api/health
+    autoDeploy: true
+
+    envVars:
+      # sync:false = Render prompts for this in the dashboard and never stores it in git.
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: NODE_VERSION
+        value: 22.19.0
+
+# NOTE ON PERSISTENCE
+# Render's free tier has an ephemeral filesystem, so data/store.db is reset on each
+# deploy or instance restart. The app recreates the schema automatically, so it always
+# boots clean rather than crashing. To retain post history across restarts, upgrade the
+# service to a paid instance and attach a disk, then set DATA_DIR to its mount path:
+#
+#   disk:
+#     name: agent-data
+#     mountPath: /var/data
+#     sizeGB: 1
+#   envVars:
+#     - key: DATA_DIR
+#       value: /var/data

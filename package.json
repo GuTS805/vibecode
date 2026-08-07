@@ -1,0 +1,24 @@
+{
+  "name": "autonomous-persona-agent",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "An autonomous AI persona that discovers, judges, and publishes tech/AI posts on its own schedule.",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "dev:client": "npm --prefix client run dev",
+    "build": "npm --prefix client install --no-audit --no-fund && npm --prefix client run build"
+  },
+  "dependencies": {
+    "@google/generative-ai": "^0.24.1",
+    "better-sqlite3": "^11.10.0",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "node-cron": "^3.0.3",
+    "rss-parser": "^3.13.0"
+  }
+}
