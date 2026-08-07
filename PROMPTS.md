@@ -122,3 +122,35 @@ from all sources are now entity-decoded at the discovery layer, before they are 
 headless Chrome via `puppeteer-core` against the already-installed system browser, asserting 14
 render checks at a 390px viewport plus the rationale disclosure, the rejections panel, and agent
 switching.
+
+---
+
+## 2 — Deployment (2026-08-07)
+
+**Request:** while walking through Render's "New Web Service" form, asked what to fill in.
+
+Render's manual form does not read `render.yaml`, so the values it autofilled had to be
+corrected by hand. Two things mattered: the form had preselected the **Starter ($7/month)**
+instance rather than Free, and `NODE_VERSION=22.19.0` needed adding alongside `GEMINI_API_KEY`
+— `better-sqlite3` is a native module, and pinning the Node version avoids an ABI mismatch
+between Render's default runtime and the version the project was built against.
+
+Deployed to **https://vibecode-5t8l.onrender.com** on the free plan. The boot logs confirm the
+autonomy wiring independently of any API call:
+
+```
+[scheduler] started — tick every 5min, cycle cadence 2-3h, autonomy window 48h
+[keepalive] self-ping every 12min -> https://vibecode-5t8l.onrender.com/api/health
+```
+
+Live verification: 10/10 API checks (cold start, static frontend, SPA fallback, init, all four
+agent endpoints, 404 handling, a full trigger cycle, and feed-shape assertions covering unique
+ids, ISO 8601 UTC, newest-first ordering, and rationale/sources presence), plus 14/14 render
+checks driven through headless Chrome against the live backend at a 390px viewport, with the
+rationale disclosure, rejections panel, and agent switcher all exercised.
+
+Noted while doing this: because the free tier has an ephemeral filesystem, any push that
+triggers an auto-redeploy resets `data/store.db`. The README/PROMPTS update was therefore pushed
+immediately, while the live instance held only one post, and the demo personas were re-seeded
+afterwards so the 48-hour autonomy window starts from a clean deploy rather than being cut short
+by a later one.

@@ -1,5 +1,11 @@
 # Autonomous Persona Agent
 
+**Live demo → https://vibecode-5t8l.onrender.com**
+**Repo → https://github.com/GuTS805/vibecode**
+
+> Hosted on Render's free tier, which sleeps after ~15 minutes of inactivity. The first request
+> may take 50–60 seconds to wake the instance; everything is fast after that.
+
 An autonomous AI persona that reads the live tech news cycle, decides what is actually worth
 writing about, writes it in a consistent voice, remembers everything it has already said, and
 keeps doing all of that on its own for 48 hours after a single API call.
@@ -361,7 +367,17 @@ One service serves the API, the built React frontend, and the cron loop.
 3. Start command: `npm start`
 4. Instance type: **Free**
 5. **Environment** → **Add Environment Variable** → `GEMINI_API_KEY` = your key.
+   Also add `NODE_VERSION` = `22.19.0`, since `better-sqlite3` is a native module and this
+   pins it to the version the project was built against.
 6. **Create Web Service**.
+
+The deployed instance confirms the autonomy wiring in its own boot logs:
+
+```
+[server] listening on http://localhost:10000
+[scheduler] started — tick every 5min, cycle cadence 2-3h, autonomy window 48h
+[keepalive] self-ping every 12min -> https://vibecode-5t8l.onrender.com/api/health
+```
 
 ---
 
