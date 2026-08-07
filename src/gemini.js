@@ -39,6 +39,28 @@ const isQuotaOrMissing = (err) => {
   return s === 429 || s === 404 || /429|404|quota|RESOURCE_EXHAUSTED|not found/i.test(msg);
 };
 
+const isQuota = (err) => /429|quota|RESOURCE_EXHAUSTED/i.test(String(err?.message || ''));
+
+/** Google reports per-minute and per-day caps separately; the distinction matters to the user. */
+function quotaError(err) {
+  const msg = String(err?.message || '');
+  const daily = /PerDay/i.test(msg);
+  const retry = msg.match(/retry in ([0-9.]+)s/i)?.[1];
+
+  const e = new Error(
+    daily
+      ? 'Gemini free-tier daily quota is exhausted for this API key. It resets at midnight Pacific Time. ' +
+        'The autonomous loop keeps running and will publish on its own once quota returns — or add a key ' +
+        'from a different Google Cloud project to resume immediately.'
+      : `Gemini rate limit reached${retry ? `; retry in about ${Math.ceil(Number(retry))}s` : ''}. ` +
+        'This is a per-minute cap on the free tier, not a failure of the pipeline.'
+  );
+  e.code = 'QUOTA_EXHAUSTED';
+  e.daily = daily;
+  e.retryAfter = retry ? Math.ceil(Number(retry)) : null;
+  return e;
+}
+
 /**
  * Generate text, walking the model chain on quota/availability errors.
  * Retries transient 5xx/network errors once per model with a short backoff.
@@ -73,6 +95,10 @@ export async function generate(prompt, { json = false, temperature = 0.85, maxOu
       }
     }
   }
+  // Quota exhaustion is an expected free-tier condition, not a defect — surface it as such
+  // rather than leaking Google's raw error payload to the UI.
+  if (isQuota(lastErr)) throw quotaError(lastErr);
+
   throw new Error(`All Gemini models failed (${CHAIN.join(', ')}): ${lastErr?.message || lastErr}`);
 }
 

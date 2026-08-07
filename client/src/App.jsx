@@ -135,7 +135,8 @@ export default function App() {
           : `Cycle complete — nothing cleared the bar (${result.rejected} rejected).`
       );
     } catch (err) {
-      setToast(`Cycle failed: ${err.message}`);
+      // Free-tier quota exhaustion is an expected condition, not a crash — say so plainly.
+      setToast(err.message);
     } finally {
       clearInterval(ticker);
       setStage(null);

@@ -112,6 +112,15 @@ router.post('/agent/trigger', async (req, res) => {
     const result = await runCycleGuarded(agent.id, 'manual');
     res.json({ ok: true, ...result });
   } catch (err) {
+    if (err.code === 'QUOTA_EXHAUSTED') {
+      console.warn('[trigger] quota exhausted:', err.daily ? 'daily' : 'per-minute');
+      return res.status(429).json({
+        error: err.message,
+        code: 'QUOTA_EXHAUSTED',
+        daily: err.daily,
+        retryAfter: err.retryAfter,
+      });
+    }
     console.error('[trigger]', err);
     res.status(500).json({ error: err.message });
   }

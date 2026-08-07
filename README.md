@@ -414,3 +414,12 @@ failing, and the UI reports it as such.
 **No test suite.** Verification during development was done against the live API and a real
 headless browser rather than with unit tests. For a project of this scope that was the honest
 trade-off, but it is the first thing worth adding.
+
+**Free-tier quota is small and shared per project, per day.** Each cycle costs two Gemini calls.
+Beyond the per-minute cap, the free tier enforces `GenerateRequestsPerDayPerProjectPerModel`,
+which a burst of manual `/trigger` presses can exhaust for the rest of the day; it resets at
+midnight Pacific Time. When this happens the API returns a clean `429` with
+`"code": "QUOTA_EXHAUSTED"` and a human-readable message rather than Google's raw payload, and the
+UI surfaces it as an expected state. The autonomous loop is unaffected in design — it keeps
+ticking and publishes as soon as quota returns, which is well inside the 48-hour window. Adding a
+key from a different Google Cloud project restores capacity immediately.
