@@ -1,8 +1,8 @@
 import { Router } from 'express';
 import {
-  createAgent, getAgent, listAgents, getPosts, getRejections, countStats,
+  createAgent, getAgent, listAgents, getPosts, getRejections, countStats, loadPersona,
 } from './db.js';
-import { buildPersonaPrompt } from './pipeline.js';
+import { resolvePersona, personaSystemPrompt, listRegistryPersonas } from './persona.js';
 import {
   primeFirstCycle, runCycleGuarded, schedulerInfo, AUTONOMY_HOURS, isRunning,
 } from './scheduler.js';
@@ -29,6 +29,10 @@ function requireAgent(req, res) {
 
 /* ------------------------------- POST /init -------------------------------- */
 
+/**
+ * The only call required. It seeds persona state and starts the autonomous loop;
+ * nothing further is needed for posts to keep appearing for the next 48 hours.
+ */
 router.post('/agent/init', (req, res) => {
   const persona = req.body?.persona;
   if (!persona || typeof persona !== 'object') {
@@ -39,17 +43,22 @@ router.post('/agent/init', (req, res) => {
   if (!name || !domain) return bad(res, 'persona.name and persona.domain are both required');
   if (name.length > 60 || domain.length > 120) return bad(res, 'persona.name or persona.domain is too long');
 
+  const resolved = resolvePersona({ name, domain });
+
   const agent = createAgent({
-    name,
-    domain,
-    personaPrompt: buildPersonaPrompt({ name, domain }),
+    name: resolved.name,
+    domain: resolved.domain,
+    personaPrompt: personaSystemPrompt(resolved),
+    persona: resolved,
     autonomyHours: AUTONOMY_HOURS,
   });
 
-  // One API call is all it takes: the autonomous loop is now live for this agent.
   primeFirstCycle(agent.id);
 
-  console.log(`[init] agent ${agent.id} "${name}" beat="${domain}" autonomy=${AUTONOMY_HOURS}h`);
+  console.log(
+    `[init] agent ${agent.id} "${resolved.name}" (${resolved.role}) beat="${resolved.domain}" ` +
+      `persona=${resolved.source} autonomy=${AUTONOMY_HOURS}h`
+  );
   res.json({ agentId: agent.id });
 });
 
@@ -58,7 +67,8 @@ router.post('/agent/init', (req, res) => {
 router.get('/agent/feed', (req, res) => {
   const agent = requireAgent(req, res);
   if (!agent) return;
-  // Newest-first, unique ids, ISO 8601 UTC, read straight from SQLite so history persists.
+  // Newest-first, unique ids, ISO 8601 UTC, read straight from SQLite so history persists
+  // across restarts. Published posts are append-only — never mutated or deleted.
   res.json({ posts: getPosts(agent.id) });
 });
 
@@ -87,13 +97,43 @@ router.get('/agent/status', (req, res) => {
   });
 });
 
-/* ----------------------------- GET /rejections ----------------------------- */
+/* ------------------------------ GET /persona ------------------------------- */
 
-router.get('/agent/rejections', (req, res) => {
+/** The full config every prompt is built from — the voice, in inspectable form. */
+router.get('/agent/persona', (req, res) => {
   const agent = requireAgent(req, res);
   if (!agent) return;
-  res.json({ rejections: getRejections(agent.id) });
+  try {
+    res.json({ agentId: agent.id, persona: loadPersona(agent) });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
+
+/* ------------------- GET /rejections and /debug/rejected ------------------- */
+
+/**
+ * Editorial judgment is only credible if the rejections are visible. Every candidate the
+ * agent declined is logged with the standard it failed and its score, even though the
+ * required API surface does not expose any of this.
+ */
+function rejectionsHandler(req, res) {
+  const agent = requireAgent(req, res);
+  if (!agent) return;
+  const rejections = getRejections(agent.id);
+  const stats = countStats(agent.id);
+  res.json({
+    agentId: agent.id,
+    evaluated: stats.evaluated,
+    accepted: stats.accepted,
+    rejected: stats.rejected,
+    acceptanceRate: stats.evaluated ? Number((stats.accepted / stats.evaluated).toFixed(3)) : 0,
+    rejections,
+  });
+}
+
+router.get('/agent/rejections', rejectionsHandler);
+router.get('/debug/rejected', rejectionsHandler);
 
 /* ------------------------------ POST /trigger ------------------------------ */
 
@@ -112,17 +152,20 @@ router.post('/agent/trigger', async (req, res) => {
     const result = await runCycleGuarded(agent.id, 'manual');
     res.json({ ok: true, ...result });
   } catch (err) {
-    if (err.code === 'QUOTA_EXHAUSTED') {
-      console.warn('[trigger] quota exhausted:', err.daily ? 'daily' : 'per-minute');
+    if (err.code === 'RATE_LIMITED' || err.code === 'GROUNDING_QUOTA') {
+      console.warn(`[trigger] ${err.code}`);
       return res.status(429).json({
         error: err.message,
-        code: 'QUOTA_EXHAUSTED',
-        daily: err.daily,
+        code: err.code,
+        daily: !!err.daily,
         retryAfter: err.retryAfter,
       });
     }
+    if (['AUTH_FAILED', 'NO_API_KEY', 'FORBIDDEN', 'BAD_MODEL'].includes(err.code)) {
+      return res.status(503).json({ error: err.message, code: err.code });
+    }
     console.error('[trigger]', err);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: err.message, code: err.code || 'UNKNOWN' });
   }
 });
 
@@ -141,6 +184,14 @@ router.get('/agents', (_req, res) => {
   });
 });
 
+/** The personas defined in persona.json, for anyone wondering what names /init knows. */
+router.get('/personas', (_req, res) => res.json({ personas: listRegistryPersonas() }));
+
 router.get('/health', (_req, res) => {
-  res.json({ ok: true, agents: listAgents().length, model: getActiveModel(), uptime: process.uptime() });
+  res.json({
+    ok: true,
+    agents: listAgents().length,
+    model: getActiveModel(),
+    uptime: process.uptime(),
+  });
 });

@@ -22,15 +22,26 @@ services:
       # sync:false = Render prompts for this in the dashboard and never stores it in git.
       - key: GEMINI_API_KEY
         sync: false
+      # better-sqlite3 is a native module; pinning Node avoids an ABI mismatch between
+      # Render's default runtime and the version the project was built against.
       - key: NODE_VERSION
         value: 22.19.0
 
-# NOTE ON PERSISTENCE
-# Render's free tier has an ephemeral filesystem, so data/store.db is reset on each
-# deploy or instance restart. The app recreates the schema automatically, so it always
-# boots clean rather than crashing. To retain post history across restarts, upgrade the
-# service to a paid instance and attach a disk, then set DATA_DIR to its mount path:
+# TWO FREE-TIER CAVEATS, both of which affect the 48-hour autonomy window:
 #
+# 1. Render sleeps a free web service after ~15 minutes without inbound traffic, which
+#    stops the cron timer. Two mitigations are built in: a self-ping to /api/health every
+#    12 minutes whenever RENDER_EXTERNAL_URL is set, and overdue-detection in the
+#    scheduler, so a revived instance immediately runs the cycle it owed instead of
+#    losing it. Robust, but not bulletproof.
+#
+# 2. The free filesystem is ephemeral, so data/store.db is reset on every deploy or
+#    instance restart. The schema is recreated automatically on boot, so the app always
+#    comes back clean rather than crashing — but post history does not survive.
+#
+# To fix both, move to a paid instance and attach a disk:
+#
+#   plan: starter
 #   disk:
 #     name: agent-data
 #     mountPath: /var/data

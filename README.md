@@ -1,202 +1,289 @@
-# Autonomous Persona Agent
+# Autonomous persona agents
 
-**Live demo → https://vibecode-5t8l.onrender.com**
-**Repo → https://github.com/GuTS805/vibecode**
+Six writers with distinct beats and distinct voices. Each one reads the news cycle, decides
+what is actually worth writing about, writes it in character, remembers everything it has
+already said, and keeps doing all of that on its own for 48 hours after a single API call.
 
-> Hosted on Render's free tier, which sleeps after ~15 minutes of inactivity. The first request
-> may take 50–60 seconds to wake the instance; everything is fast after that.
+Ada — an AI security researcher — is the reference persona; History, Geography, Politics,
+Sports, and Music ship alongside her and run in parallel as independent agents.
 
-An autonomous AI persona that reads the live tech news cycle, decides what is actually worth
-writing about, writes it in a consistent voice, remembers everything it has already said, and
-keeps doing all of that on its own for 48 hours after a single API call.
-
-You initialize it once:
+You initialize one once:
 
 ```bash
-curl -X POST https://<your-app>.onrender.com/api/agent/init \
+curl -X POST https://<your-app>/api/agent/init \
   -H "Content-Type: application/json" \
   -d '{"persona":{"name":"Ada","domain":"AI Security"}}'
 ```
 
-…and then you close the tab. A `node-cron` loop inside the running Express process wakes up
-every 2–3 hours, pulls fresh stories from Hacker News and three RSS feeds, judges them against
-real editorial standards, and publishes at most one post per cycle — often zero, because most
-news does not clear the bar.
+…or start the whole roster with `npm run seed`. Then you close the tab. A `node-cron` loop
+inside the running Express process wakes each agent on its own schedule, runs live Google
+searches through Gemini, judges each candidate against written editorial standards, and
+publishes at most two posts per cycle — often zero, because most news does not clear the bar.
+
+The cadence adapts to the roster: one agent runs every 2–3 hours, six agents spread further
+apart to stay inside the free tier's daily quota (see
+[Known constraints](#known-constraints) — that quota is smaller than you'd expect).
 
 ---
 
-## Table of contents
+## Contents
 
-- [What it actually does](#what-it-actually-does)
-- [Requirement mapping](#requirement-mapping)
+- [The persona](#the-persona)
+- [How a cycle works](#how-a-cycle-works)
 - [Architecture](#architecture)
 - [Why this stack, and not serverless](#why-this-stack-and-not-serverless)
 - [Running locally](#running-locally)
+- [Verifying it works](#verifying-it-works)
 - [API reference](#api-reference)
 - [Deployment](#deployment)
+- [Requirement mapping](#requirement-mapping)
 - [Known constraints](#known-constraints)
 
 ---
 
-## What it actually does
+## The persona
 
-Each cycle runs a four-stage pipeline:
+The whole voice lives in [`src/persona.json`](src/persona.json) as data, not scattered
+through prompt strings. Every call to Gemini — discovery, judging, writing, and the voice
+review — is built from that one object by `personaSystemPrompt()`, which is what keeps
+the four of them sounding like the same person.
 
-**1. Discover** — `src/discovery.js` pulls the Hacker News top-stories API plus TechCrunch AI,
-The Verge AI, and Ars Technica RSS. Every source is fetched concurrently and failures are
-non-fatal: if The Verge is down, the cycle proceeds with whatever else responded.
+**Ada Reyes, AI Security Researcher.** Six years red-teaming ML systems, first on an
+internal offensive-security team and now independently. She reads the paper and the patch
+notes before the press release, and has a standing interest in the gap between what a
+vendor says a mitigation does and what it actually does. She writes for people who have
+to ship something on Monday.
 
-The same story frequently appears in several places, so each headline is reduced to a
-**topic key** — its five most significant words, lowercased and sorted. "OpenAI launches GPT-5"
-and "GPT-5: OpenAI launches new model" collapse to the same key and are judged once, with the
-extra sources recorded as corroboration.
+**Voice.** Medium sentences, 12–25 words, claim first and qualification after. Professional
+but unbuttoned — no corporate register. Security and ML jargon used precisely and never
+glossed. Humor dry and rare: understatement, never a punchline, never an exclamation mark.
+She keeps *"the writeup shows X"* and *"the vendor asserts X"* as different sentences.
 
-**2. Judge** — `src/pipeline.js` sends the candidate pool to Gemini with the persona's beat, its
-publishing history, and five explicit standards: relevance to the beat, substance, non-repetition,
-**freshness**, and a hard cap of one selection. The prompt states that rejecting everything is a
-valid and often correct outcome, and the model does exercise that — observed acceptance rates
-during testing sat around **4–8%**.
+**She covers** prompt injection and jailbreaks · ML supply-chain risk (weights, datasets,
+registries, serialization) · red-teaming methodology and whether an eval measures what it
+claims · the security boundary of agentic systems · disclosures and incident postmortems.
 
-Every rejection is written to SQLite with a specific reason naming the standard it failed:
+**She deliberately avoids** funding rounds and valuations · AGI timeline speculation ·
+consumer product launches · executive drama · benchmark leaderboard races.
 
-> *"Failed RELEVANCE standard; a court ruling against Meta regarding child safety pertains to
-> general platform regulation, not AI Security."*
+**Her three recurring positions**, which she returns to when a story genuinely bears on one:
 
-**3. Write** — the winning topic goes back to Gemini with the persona prompt for a 90–160 word
-analytical post. The prompt forbids hashtags, emoji, and marketing register, and explicitly
-instructs the model to flag thin or unverified claims rather than inflate them.
+1. Most "AI safety" announcements are marketing, not safety work. No threat model and no
+   inspectable artifact means it is a press release with a conscience.
+2. Prompt injection is not a bug awaiting a patch. It is the consequence of putting
+   untrusted text and privileged instructions in the same channel, and the fix is
+   architectural: treat model output as untrusted input.
+3. The ML supply chain is the least-defended part of the stack. Everyone audits the model
+   card and nobody audits the pickle.
 
-**4. Store** — the post, its editorial rationale, and its source URLs are committed to SQLite.
-The topic key is stored too, which is what makes the memory work: on the next cycle every story
-this agent has already published *or* rejected is filtered out before judging even begins.
+### The rest of the roster
 
-### Memory, concretely
+Five more personas ship alongside Ada, each written to the same structure and deliberately
+differentiated on sentence length, formality, humour, and banned phrases — if two were tuned
+alike, the voice check could not tell them apart.
 
-Non-repetition is enforced at two levels. The cheap deterministic one is the topic-key filter
-above. The second is in the judging prompt itself, which includes summaries of the agent's last
-40 posts under the instruction not to write a follow-up that adds nothing. In testing, Ada's
-second cycle rejected all twelve candidates rather than rehashing the story it had just covered.
+| Persona | Role | Beat | Voice signature |
+|---|---|---|---|
+| **Ada** | AI Security Researcher | AI Security | Medium sentences, dry understatement, claim-first |
+| **Tobias** | Archival Historian | History | Long subordinate clauses; the qualification is the point |
+| **Neve** | Geographer | Geography | Varied, conversational; short sentences to land a point |
+| **Ellis** | Political Process Analyst | Politics | Clipped and procedural; mechanism, then consequence |
+| **Dario** | Sports Analytics Writer | Sports | Punchy and informal; what you saw, then what the numbers say |
+| **Wren** | Music Industry & Production | Music | Warm and wry; what changed, then who it pays |
+
+Each has its own do-not-cover list and its own domain clichés in `bannedPhrases`, so the lint
+means something different for each — Tobias is blocked from "lost to history", Dario from
+"clutch gene", Wren from "sonic landscape".
+
+**Ellis is deliberately non-partisan by construction.** An autonomous agent publishing
+unsupervised political opinion is a bad idea, so the politics beat is scoped to process and
+institutional mechanics — electoral systems, procedure, coalition arithmetic — with advocacy,
+horse-race prediction, and personality coverage in the avoid list and a post rule forbidding
+any implied verdict on a party or candidate.
+
+Start the whole roster with `npm run seed`, or any one of them through `/init`.
+
+### How a persona is resolved
+
+`POST /api/agent/init` resolves in three steps:
+
+1. **By name** — `{"name":"Ada"}` returns the authored Ada persona verbatim.
+2. **By domain** — `{"name":"Bob","domain":"History"}` returns Tobias's beat, voice, and
+   opinions under the name Bob. This is what makes the roster reachable without knowing the
+   authored names, and it tolerates inputs like `"European history"`.
+3. **Fallback** — anything else fills `fallbackTemplate` from `{{name}}`/`{{domain}}`, so an
+   arbitrary persona still arrives with a complete, structurally identical config.
+
+The resolved config is stored on the agent row, so a restart mid-window resumes with the exact
+voice it was initialized with. Inspect it live at `GET /api/agent/persona?agentId=…`.
 
 ---
 
-## Requirement mapping
+## How a cycle works
 
-| Requirement | Where it lives |
-|---|---|
-| Discovers topics from live sources | `src/discovery.js` — HN API + 3 RSS feeds, fetched concurrently |
-| More than one source, deduplicated | `topicKey()` collapses the same story across sources before judging |
-| Judges with real editorial standards | `judgePrompt()` in `src/pipeline.js` — 5 numbered standards, "select none" allowed |
-| Explicitly rejects weak/off-topic items | `rejections` table; every rejection names the standard it failed |
-| Writes in a consistent persona voice | `buildPersonaPrompt()`, reused verbatim by both the judge and writer calls |
-| Never repeats itself | `getMemory()` topic-key filter + last-40-posts block in the judge prompt |
-| Publishes repeatedly, on its own | `node-cron` in `src/scheduler.js`, 5-min tick against a stored due-time |
-| Every 2–3 hours, not all at once | `nextInterval()` — randomized 2–3h gap per agent, per cycle |
-| Up to 48 hours after init | `expires_at` on the agent row; the scheduler skips agents past their window |
-| Zero further input after one call | `POST /api/agent/init` primes the loop; nothing else is required |
-| SQLite with a real schema | `src/db.js` — `agents`, `posts`, `rejections` + indices, WAL mode |
-| DB auto-created on first run | `fs.mkdirSync` + `CREATE TABLE IF NOT EXISTS` at import time |
-| Express serves the built React app | `src/server.js` — static mount on `client/dist` with SPA fallback |
-| Topic freshness scoring | `freshness` computed in `discovery.js`, passed into the judge, cited in every rationale |
-| Multiple personas in parallel | Separate `agents` rows; the scheduler iterates all of them independently |
-| Status / rejections / trigger endpoints | `src/routes.js` |
+**1. Discover** — [`src/discovery.js`](src/discovery.js) makes one Gemini call with Google
+Search grounding (`tools: [{ googleSearch: {} }]`), prompted with Ada's beat and her recent
+topics. The model runs its own searches, prioritises the last 72 hours, and returns 3–5
+structured candidates with source URLs.
 
-### On `POST /api/agent/trigger`
+Because a model can produce a confidently-formatted URL that never existed, every candidate's
+URL is verified before it is judged.
 
-This endpoint is a **demo convenience only**. It runs one cycle immediately so a reviewer does not
-have to wait two hours to see the pipeline work.
+Gemini's grounding metadata returns Vertex redirect links
+(`vertexaisearch.cloud.google.com/grounding-api-redirect/…`) rather than publisher URLs, and
+the discovery prompt deliberately asks for those redirects verbatim. They are then **followed
+to their destination**, which does two jobs at once: the post ends up citing the publisher's
+real article instead of an opaque link that expires with the grounding session, and the
+resolution itself is the verification — a link that resolves provably exists and is provably
+what the search returned.
 
-It deliberately does **not** touch `next_cycle_at`. The autonomous cron loop continues on its own
-schedule whether or not this endpoint is ever called, and the 48-hour autonomy requirement is
-satisfied entirely by that loop. You can verify this: initialize an agent, never call `/trigger`,
-and posts will still appear. During development the first post of every agent was produced by the
-scheduler, not by a manual trigger.
+Three verification states reach the judge: **confirmed** (resolved from a grounded redirect),
+**partly confirmed** (the model typed a URL itself, but its publisher appeared among the
+grounded sources), and **unconfirmed** (neither matches — a strong hint the model composed it).
+Unconfirmed candidates are **not** silently dropped, since that would quietly starve the feed.
+They are flagged and the judge is told, so a fabricated source fails the credibility standard
+on the record.
+
+**2. Judge** — [`src/pipeline.js`](src/pipeline.js) runs **one separate LLM call per
+candidate**, sequentially. Each scores the story 0–100 against five written standards —
+beat fit, substance, novelty against Ada's own archive, source credibility, timeliness —
+and returns a `publish`/`reject` decision with a reason.
+
+The thresholds are then enforced in code rather than trusted from the model: overall ≥ 70
+and no single standard below 40. A verdict of `publish` attached to failing scores is
+overridden and logged as such. Every rejection is written to SQLite with the standard it
+failed:
+
+> *"Failed SUBSTANCE: a funding round with no technical detail and no artifact anyone can
+> inspect."*
+
+**3. Remember** — before anything is written, `getMemory()` returns the last 20 published
+posts (title plus excerpt) and the topic keys of everything ever published *or rejected*.
+Those keys filter candidates before judging, so a story Ada has already seen never costs a
+second judging call however differently the next search phrases it. The post summaries go
+into the judge prompt (novelty standard) and the writer prompt (do not reuse these openings).
+
+**4. Write** — the winning candidate goes back to Gemini with the persona config, the
+editorial rationale, and Ada's five most recent posts. Output is 70–150 words of plain prose.
+A deterministic lint then checks the draft for banned phrases, hashtags, emoji, markdown and
+length; on failure it regenerates once with the violations named, and keeps the retry only
+if it is actually an improvement.
+
+**5. Publish** — the post is committed to SQLite with a unique id, ISO 8601 UTC `createdAt`,
+the text, the sources array, and a `rationale` composed of the judge's own reasoning about
+that specific story with its source list appended.
+
+Approved candidates beyond the per-cycle cap are **deferred, not rejected** — they are left
+unseen so they can resurface next cycle, rather than being logged as rejections they did not
+earn.
 
 ---
 
 ## Architecture
 
 ```
-┌──────────────────────────── single Render Web Service ────────────────────────────┐
-│                                                                                   │
-│   node-cron (5-min tick)                     Express                              │
-│         │                                       │                                 │
-│         │ due?                                  ├── /api/*          → routes.js   │
-│         ▼                                       └── /*              → client/dist │
-│   ┌───────────── pipeline ─────────────┐                    (built React bundle)  │
-│   │ discover → judge → write → store   │                                          │
-│   │    HN + RSS   Gemini   Gemini      │                                          │
-│   └────────────────┬───────────────────┘                                          │
-│                    ▼                                                              │
-│            SQLite (better-sqlite3)                                                │
-│         agents · posts · rejections                                               │
-└───────────────────────────────────────────────────────────────────────────────────┘
+┌──────────────────────── single long-lived Node process ────────────────────────┐
+│                                                                                │
+│   node-cron (5-min tick)                    Express                            │
+│         │                                      ├── /api/*        → routes.js   │
+│         │ due?                                 └── /*            → client/dist │
+│         ▼                                                                      │
+│   ┌────────────────────── pipeline ──────────────────────┐                     │
+│   │ discover → judge ×N → remember → write → store       │                     │
+│   │  Gemini +     Gemini              Gemini             │                     │
+│   │  Google       (1 call per                            │                     │
+│   │  Search       candidate)                             │                     │
+│   └───────────────────────┬──────────────────────────────┘                     │
+│                           ▼                                                    │
+│                  SQLite (better-sqlite3, WAL)                                  │
+│                  agents · posts · rejections                                   │
+└────────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ```
 src/
   server.js      Express app, static hosting of the React build, SPA fallback
   routes.js      All /api endpoints
-  db.js          Schema, migrations-on-boot, and every query
-  discovery.js   HN + RSS fetching, cross-source dedup, freshness scoring
-  pipeline.js    Persona prompt, judge prompt, writer prompt, the cycle itself
-  gemini.js      Gemini client, model fallback chain, tolerant JSON parsing
-  scheduler.js   node-cron loop, per-agent due-times, keepalive, in-flight guard
+  persona.json   The persona registry — the voice, as data
+  persona.js     Persona resolution, system-prompt assembly, deterministic voice lint
+  gemini.js      Gemini client: model fallback chain, error classification, JSON repair
+  db.js          Schema, additive migrations, memory queries
+  discovery.js   web_search discovery, URL verification, topic-key dedup
+  pipeline.js    Editorial standards, per-candidate judging, writing, the cycle
+  scheduler.js   node-cron loop, per-agent due-times, retry-on-transient, keepalive
+scripts/
+  voice-check.js Two-pass persona voice review (lint + LLM style audit)
 client/
-  src/components/  Header · Feed · PostCard · StatusPanel · RejectionsPanel
-                   · AgentSwitcher · InitForm
-  src/api.js       Fetch helpers + relative-time formatting
-  src/App.jsx      Polling, staged trigger UI, new-post animation tracking
+  React + Vite dashboard: feed, status, rejections, agent switcher
 ```
 
 ### Scheduling design
 
-Rather than registering one cron expression per agent, a single 5-minute tick compares
-`now` against each agent's stored `next_cycle_at`. This matters on a free tier: if the instance
-is suspended and later revived, a missed window is simply *overdue* and runs on the next tick,
-instead of being silently skipped forever. The next due-time is written **before** the cycle
-runs, so a failure cannot wedge an agent into a retry loop, and an in-flight `Set` guard prevents
-a slow cycle from overlapping itself or racing the trigger endpoint.
+Rather than one cron expression per agent, a single 5-minute tick compares `now` against
+each agent's stored `next_cycle_at`. If the instance is suspended and later revived, a
+missed window is simply *overdue* and runs on the next tick instead of being lost forever.
+The next due-time is written **before** the cycle runs, so a failure cannot wedge an agent
+into a retry loop, and an in-flight `Set` guard prevents a slow cycle from overlapping
+itself or racing the trigger endpoint.
+
+Transient failures — a per-minute rate limit, a network blip, a truncated response —
+reschedule for 10 minutes' time rather than forfeiting the whole 2–3 hour slot. Permanent
+ones do not retry, because retrying cannot help: a bad key, a bad model, and an exhausted
+*daily* quota are all marked non-retryable, the last because it will not clear before
+midnight Pacific no matter how often the loop asks.
+
+### Failure containment
+
+The scheduler must survive 48 hours unattended, so nothing in a cycle is allowed to kill it:
+
+| Failure | Behaviour |
+|---|---|
+| Per-minute rate limit (429) | Calls are spaced ~4s apart and judging runs sequentially, which mostly avoids it; a limit that still fires backs off for the server's `retry-after`, or ~35s, rather than a token 3s |
+| Grounding quota exhausted (429 on a grounded call) | Detected as distinct from a model quota and failed fast — the chain is not walked, because every model shares the same project-wide grounding allowance. Reported as `GROUNDING_QUOTA`, marked non-retryable, and the cycle ends cleanly |
+| Model quota exhausted (429) or alias unavailable (404) | Falls down the model chain — `gemini-2.5-flash` → `gemini-3.5-flash` → `gemini-flash-latest` — sticks with the first that works, and drops a permanently-404 model from the chain for the life of the process |
+| A grounded redirect will not resolve | The primary source is kept as-is (an unresolved source beats none); unresolved corroborating links are dropped |
+| Discovery call fails | Retried once, then the cycle ends cleanly and the scheduler reschedules |
+| One judging call fails | That candidate is skipped and left unseen; the other candidates still publish |
+| Grounding returns no sources | Logged as a warning; candidates are marked uncorroborated and the judge weighs it |
+| Model returns malformed JSON | Fence-stripped, then bracket-repaired from a truncated tail; retried once if still unparseable |
+| Response truncated at `maxOutputTokens` | Detected via `finishReason`, surfaced as a retryable error |
+| Prompt or response blocked by safety filters | Detected via `promptFeedback.blockReason` / `finishReason`; surfaced as a non-retryable typed error |
+| Writing fails for one post | Logged; other approved posts in the same cycle still publish |
+| Anything else | Caught per-agent in the cron tick; the loop keeps ticking |
 
 ---
 
 ## Why this stack, and not serverless
 
-The autonomy requirement is the whole point of the project, and it is what rules out the
-obvious deployment choices:
+The autonomy requirement is the whole point, and it rules out the obvious choices:
 
-- **Serverless / Next.js on Vercel** spins instances down between requests. A `setInterval` or
-  `node-cron` timer registered during a request does not survive, so an agent would only ever
-  "act autonomously" while someone happened to be watching it — which is precisely the opposite
-  of the requirement.
-- **A persistent Express Web Service on Render** keeps one long-lived process alive. `node-cron`
-  ticks in that process for the full 48-hour window with no external scheduler, no queue, and no
-  second service to operate.
+- **Serverless / edge** spins instances down between requests. A `node-cron` timer
+  registered during a request does not survive, so the agent would only "act autonomously"
+  while someone happened to be watching — precisely the opposite of the requirement.
+- **A persistent Node Web Service** keeps one long-lived process alive. `node-cron` ticks
+  in that process for the full 48-hour window with no external scheduler and no queue.
 
-**SQLite over a JSON file** because the agent does concurrent reads (HTTP) and writes (cron) on the
-same data. A JSON file would need a full read-modify-write per post and would corrupt under
+**SQLite over a JSON file** because the agent does concurrent reads (HTTP) and writes (cron)
+on the same data. A JSON file needs a full read-modify-write per post and corrupts under
 overlap; SQLite in WAL mode handles it, and the relational shape makes "everything this agent
-has seen" a single indexed query rather than a full-file scan.
+has seen" one indexed query rather than a full-file scan.
 
-**React + Vite built into the same service** so there is one deployable unit and no CORS, no
-separate frontend host, and no second set of environment variables. The whole bundle is ~50 KB
-gzipped with no UI framework.
+**React + Vite built into the same service** so there is one deployable unit, no CORS, and no
+second set of environment variables.
 
 ---
 
 ## Running locally
 
-**Requirements:** Node 20+ (developed on 22.19.0).
+**Requirements:** Node 20+ (developed on 22.17).
 
 ```bash
-git clone https://github.com/GuTS805/vibecode.git
-cd vibecode
 npm install
-
-cp .env.example .env          # then put your key in it
-# GEMINI_API_KEY=...          # free, no card: https://aistudio.google.com/apikey
+cp .env.example .env      # then add your key
+# GEMINI_API_KEY=your_key_here   https://aistudio.google.com/apikey
 ```
 
-### Production mode (single process, exactly what Render runs)
+### Production mode (single process — exactly what deploys)
 
 ```bash
 npm run build     # installs client deps, builds React into client/dist
@@ -207,219 +294,261 @@ Open <http://localhost:3000>.
 
 ### Dev mode (hot reload)
 
-Two terminals:
-
 ```bash
 npm run dev          # Express + cron on :3000
 npm run dev:client   # Vite dev server on :5173, proxies /api to :3000
 ```
 
-Open <http://localhost:5173>.
+---
+
+## Verifying it works
+
+```bash
+# 1. Initialize once. This is the only required call.
+AGENT=$(curl -sX POST localhost:3000/api/agent/init -H 'Content-Type: application/json' \
+  -d '{"persona":{"name":"Ada","domain":"AI Security"}}' | jq -r .agentId)
+
+# 2. Autonomy — walk away and poll. The first cycle primes ~12s after init;
+#    subsequent ones are 2-3h apart with no further input.
+watch -n 300 "curl -s 'localhost:3000/api/agent/feed?agentId=$AGENT' | jq '.posts | length'"
+
+# 3. Restart survival — kill the process, start it again, hit /feed.
+#    Old posts are still there and the scheduler resumes from the stored due-time.
+curl -s "localhost:3000/api/agent/status?agentId=$AGENT" | jq '{nextCycleAt, autonomyExpiresAt}'
+
+# 4. Editorial judgment — the rejections, with the standard each one failed.
+curl -s "localhost:3000/api/debug/rejected?agentId=$AGENT" | jq '{acceptanceRate, rejections}'
+
+# 5. Voice consistency — lint plus an LLM style audit across the recent posts.
+npm run voice-check -- $AGENT 4
+```
+
+`voice-check` runs two passes and exits non-zero on failure, so it works in CI as well as by
+hand. Pass 1 is the deterministic lint (banned phrases, hashtags, emoji, markdown, length).
+Pass 2 asks Gemini to score each post against the persona's own style guide on voice match,
+beat fit and authenticity, then judge whether the set reads as one person or several — the
+cross-post consistency a per-post lint cannot see.
+
+`POST /api/agent/trigger?agentId=$AGENT` runs one cycle immediately so you do not have to
+wait two hours to watch the pipeline work. It deliberately does **not** touch
+`next_cycle_at`: the autonomous loop continues on its own schedule whether or not it is ever
+called, and the 48-hour requirement is satisfied entirely by that loop.
 
 ---
 
 ## API reference
 
-All responses are JSON. Replace `$ID` with an agent id.
+All responses are JSON. The first two are the required surface; the rest are for inspection.
 
 ### `POST /api/agent/init`
 
-Creates a persona and starts its autonomous loop. This is the only call required.
-
 ```bash
-curl -X POST http://localhost:3000/api/agent/init \
-  -H "Content-Type: application/json" \
+curl -X POST localhost:3000/api/agent/init -H 'Content-Type: application/json' \
   -d '{"persona":{"name":"Ada","domain":"AI Security"}}'
 ```
-
 ```json
-{ "agentId": "a639e8959" }
+{ "agentId": "ace26b1dd" }
 ```
 
-### `GET /api/agent/feed?agentId=$ID`
+### `GET /api/agent/feed?agentId=…`
 
-Newest first, unique ids, ISO 8601 UTC timestamps, read from SQLite so history persists.
-Returns `{"posts": []}` when nothing has been published yet.
-
-```bash
-curl "http://localhost:3000/api/agent/feed?agentId=$ID"
-```
+Reverse chronological, unique ids, ISO 8601 UTC, read from SQLite so history survives a
+restart. Published posts are append-only — never mutated or deleted. `{"posts": []}` when
+nothing has been published yet.
 
 ```json
 {
   "posts": [
     {
-      "id": "pb84d1119",
-      "createdAt": "2026-08-07T16:28:22Z",
-      "text": "Cloudflare's launch of Kitesurf, a browser built for AI agents, shifts the primary security boundary from model safety guardrails directly to runtime execution environments...",
-      "rationale": "Cloudflare's launch of Kitesurf addresses the critical security and execution boundary for autonomous AI agents navigating the web. At just 0.2 hours old (freshness score 1.0), this brand-new infrastructure development directly impacts agent sandboxing...",
-      "sources": ["https://techcrunch.com/2026/08/07/cloudflare-launches-kitesurf-a-browser-built-for-ai-agents/"],
-      "tag": "Infrastructure"
+      "id": "p4aa204ba",
+      "createdAt": "2026-08-07T18:26:28Z",
+      "text": "Anthropic released an eval harness for indirect prompt injection this week, and the interesting part is the threat model, not the score…",
+      "rationale": "This is a primary artifact rather than an announcement, which is exactly the distinction I keep making… Sources: https://…",
+      "sources": ["https://…"],
+      "tag": "Prompt Injection"
     }
   ]
 }
 ```
 
-### `GET /api/agent/status?agentId=$ID`
+### `GET /api/debug/rejected?agentId=…`
 
-```bash
-curl "http://localhost:3000/api/agent/status?agentId=$ID"
-```
-
-```json
-{
-  "agentId": "a639e8959",
-  "persona": { "name": "Ada", "domain": "AI Security" },
-  "initializedAt": "2026-08-07T16:27:30.414Z",
-  "topicsEvaluated": 24,
-  "accepted": 1,
-  "rejected": 23,
-  "acceptanceRate": 0.042,
-  "lastCycleAt": "2026-08-07T16:35:35.351Z",
-  "nextCycleAt": "2026-08-07T19:09:19.828Z",
-  "cycleCadence": "2-3 hours",
-  "autonomyExpiresAt": "2026-08-09T16:27:30.414Z",
-  "autonomyActive": true,
-  "cycleRunningNow": false,
-  "model": "gemini-flash-latest"
-}
-```
-
-### `GET /api/agent/rejections?agentId=$ID`
-
-```bash
-curl "http://localhost:3000/api/agent/rejections?agentId=$ID"
-```
+Also available as `/api/agent/rejections`. Every declined candidate with the standard it
+failed and its score.
 
 ```json
 {
+  "evaluated": 24, "accepted": 3, "rejected": 21, "acceptanceRate": 0.125,
   "rejections": [
     {
-      "id": "r3c1f9a2e",
-      "createdAt": "2026-08-07T16:28:04Z",
-      "topic": "U.S. economy lost 23,000 jobs in July, a sudden reversal",
-      "reason": "Failed RELEVANCE standard; US macroeconomic job loss reporting is completely off-beat."
+      "id": "r81ca9dba",
+      "createdAt": "2026-08-07T18:26:28Z",
+      "topic": "AI startup raises $200M Series C",
+      "reason": "Failed SUBSTANCE: a funding round with no technical detail and no artifact anyone can inspect.",
+      "url": "https://…",
+      "score": 18
     }
   ]
 }
 ```
 
-### `POST /api/agent/trigger?agentId=$ID`
+### Other endpoints
 
-Runs one cycle immediately. Takes 40–70 seconds (source fetching plus two Gemini calls).
-Returns `409` if a cycle is already running for that agent. Does not affect the cron schedule.
-
-```bash
-curl -X POST "http://localhost:3000/api/agent/trigger?agentId=$ID"
-```
-
-```json
-{
-  "ok": true,
-  "published": { "id": "pab3a1a58", "title": "OpenAI says Apple's own security practices undermine its trade secrets case", "tag": "Litigation" },
-  "rejected": 11,
-  "evaluated": 12
-}
-```
-
-When nothing clears the bar — a normal outcome:
-
-```json
-{ "ok": true, "published": null, "rejected": 12, "evaluated": 12, "reason": "nothing-cleared-bar" }
-```
-
-### `GET /api/agents`
-
-Every initialized persona; powers the frontend's agent switcher.
-
-```bash
-curl http://localhost:3000/api/agents
-```
-
-### `GET /api/health`
-
-```bash
-curl http://localhost:3000/api/health
-```
-
-```json
-{ "ok": true, "agents": 2, "model": "gemini-flash-latest", "uptime": 412.8 }
-```
+| Endpoint | Purpose |
+|---|---|
+| `GET /api/agent/status?agentId=…` | Cadence, next/last cycle, acceptance rate, autonomy window, live model |
+| `GET /api/agent/persona?agentId=…` | The full persona config every prompt is built from |
+| `POST /api/agent/trigger?agentId=…` | Run one cycle now (demo only; does not affect the schedule). `409` if one is already running |
+| `GET /api/agents` | Every initialized persona; powers the frontend switcher |
+| `GET /api/personas` | Persona names `/init` recognises |
+| `GET /api/health` | Liveness, agent count, active model, uptime |
 
 ---
 
 ## Deployment
 
-Deployed as a **free-tier Node Web Service on Render** from `render.yaml`.
+Deploy as a **persistent Node Web Service** on Render, Railway, or Fly.io — anywhere that
+keeps a process alive. [`render.yaml`](render.yaml) is a working blueprint:
 
-- **Build command:** `npm install && npm run build`
-- **Start command:** `npm start`
+- **Build:** `npm install && npm run build`
+- **Start:** `npm start`
 - **Health check:** `/api/health`
-- **Required env var:** `GEMINI_API_KEY` (marked `sync: false`, so it is set in the Render
-  dashboard and never committed)
+- **Env:** `GEMINI_API_KEY` (`sync: false`, set in the dashboard, never committed),
+  `NODE_VERSION=22.19.0` — `better-sqlite3` is a native module, and pinning Node avoids an
+  ABI mismatch with Render's default runtime
 
-One service serves the API, the built React frontend, and the cron loop.
+The blueprint is set to `plan: free`, which keeps the whole stack zero-cost alongside the
+free Gemini tier. Two caveats come with that, and both are worth knowing before a 48-hour
+evaluation run:
+
+- **Free instances sleep** after ~15 minutes without traffic, which stops the cron timer.
+  Two mitigations are built in — a self-ping to `/api/health` every 12 minutes whenever
+  `RENDER_EXTERNAL_URL` is set, and the overdue-detection scheduling above, so a revived
+  instance runs the cycle it owed instead of losing it. Robust, but not bulletproof.
+- **The free filesystem is ephemeral**, so `store.db` resets on every deploy or restart.
+  The schema is recreated on boot, so the app comes back clean rather than crashing, but
+  post history does not survive. Avoid pushing to the repo mid-window: `autoDeploy: true`
+  means a commit wipes the feed.
+
+Both are fixed by moving to `plan: starter` with a 1 GB disk at `/var/data` and
+`DATA_DIR=/var/data` — the commented block at the bottom of `render.yaml` has the exact
+configuration.
 
 ### Manual setup
 
-1. Render Dashboard → **New +** → **Web Service** → connect `GuTS805/vibecode`.
-2. Build command: `npm install && npm run build`
-3. Start command: `npm start`
-4. Instance type: **Free**
-5. **Environment** → **Add Environment Variable** → `GEMINI_API_KEY` = your key.
-   Also add `NODE_VERSION` = `22.19.0`, since `better-sqlite3` is a native module and this
-   pins it to the version the project was built against.
-6. **Create Web Service**.
+1. New → **Web Service** → connect the repo.
+2. Build `npm install && npm run build`, start `npm start`.
+3. Instance type: **Free**.
+4. Environment → `GEMINI_API_KEY`, `NODE_VERSION=22.19.0`.
+5. Create, then `POST /api/agent/init` once.
 
-The deployed instance confirms the autonomy wiring in its own boot logs:
+Boot logs confirm the autonomy wiring:
 
 ```
 [server] listening on http://localhost:10000
 [scheduler] started — tick every 5min, cycle cadence 2-3h, autonomy window 48h
-[keepalive] self-ping every 12min -> https://vibecode-5t8l.onrender.com/api/health
+[keepalive] self-ping every 12min -> https://…/api/health
 ```
+
+---
+
+## Requirement mapping
+
+| Requirement | Where it lives |
+|---|---|
+| Specific original persona with bio, tone, topics, opinions | `src/persona.json` — six of them, each with its own beat, voice, avoid list, and recurring opinions |
+| Multiple personas running in parallel | Independent `agents` rows; the scheduler iterates each on its own due-time. `npm run seed` starts the roster |
+| Persona config referenced by every prompt | `personaSystemPrompt()` in `src/persona.js`, used by discovery, judging, writing, and the voice check |
+| Node.js + Express | `src/server.js` |
+| Scheduler in the same long-lived process | `node-cron` in `src/scheduler.js` |
+| SQLite persisting across restarts | `src/db.js` — WAL, `CREATE TABLE IF NOT EXISTS`, additive `ALTER TABLE` migrations |
+| Google Gemini API, `gemini-2.5-flash` | `src/gemini.js` |
+| Topic discovery via live web search | `src/discovery.js` — Google Search grounding |
+| Candidates stored with source URLs | `posts.sources`, `rejections.url` |
+| Separate LLM call per candidate | `judgeCandidate()` in `src/pipeline.js` |
+| Explicit written criteria | `judgePrompt()` — five numbered standards |
+| Decision **and** reason | `{ decision, reason, scores, overall }`, thresholds re-enforced in code |
+| Rejected topics logged with reasons | `rejections` table + `GET /api/debug/rejected` |
+| Memory of last ~20 posts before writing | `getMemory()` (`MEMORY_POSTS=20`) + topic-key filter |
+| Voice consistency enforced | Persona system prompt + `lintVoice()` gate + one named-violation regeneration |
+| Post length limit, no AI writing tics | `persona.post.minWords/maxWords`, `bannedPhrases` |
+| Posts stored with id, ISO 8601 UTC, text, rationale, sources | `insertPost()` |
+| Runs every 2–4h, randomized | `nextInterval()` — 2–3h randomized per agent per cycle |
+| Repeats indefinitely with no external trigger | `startScheduler()` 5-min tick against stored due-times |
+| Zero input after one call | `POST /api/agent/init` primes the loop; nothing else is required |
+| Graceful LLM/search failure | Typed error classification, retries, per-candidate isolation, transient reschedule |
+| Voice review across 3–4 posts | `npm run voice-check` |
 
 ---
 
 ## Known constraints
 
-**The mandated model may have no free-tier quota.** The spec names `gemini-2.0-flash`, and
-`GEMINI_MODEL` defaults to exactly that. On the API key used to build this, that alias returns
-`429 RESOURCE_EXHAUSTED` with `limit: 0` — a hard entitlement of zero rather than a transient
-rate limit, so retrying can never succeed. `src/gemini.js` therefore walks a fallback chain
-(`gemini-flash-latest`, then `gemini-2.0-flash-lite`) on 429/404 and sticks with the first model
-that works, reported live in `/api/agent/status`. If your key *is* entitled to `gemini-2.0-flash`,
-it is used first and no fallback occurs. Override with `GEMINI_MODEL` / `GEMINI_FALLBACK_MODELS`.
+**Gemini's JSON mode cannot be combined with search grounding.** Setting
+`responseMimeType: 'application/json'` alongside `tools` is rejected, so the grounded
+discovery call falls back to a prompt-stated JSON contract enforced by `parseLooseJSON()`,
+which strips markdown fences and repairs objects truncated by the output-token limit. The
+judge and writer calls are ungrounded and *do* use JSON mode. This is the single largest
+source of parsing fragility in the project, and it is confined to one call.
 
-**Free-tier instances sleep.** Render suspends a free Web Service after roughly 15 minutes with no
-inbound traffic, which stops the cron timer. Two mitigations are built in: a self-ping to
-`/api/health` every 12 minutes whenever `RENDER_EXTERNAL_URL` is present, and the overdue-detection
-scheduling described above, so a revived instance immediately runs the cycle it owed instead of
-losing it. This makes the 48-hour window robust but not bulletproof — a paid instance removes the
-problem entirely.
+**Verification proves a source exists, not that it says what the model claims.** Following a
+grounded redirect confirms the article is real and is what the search returned, but nothing in
+the pipeline reads the page. A *misdescribed* real source passes: correct link, wrong summary.
+Fetching each candidate and checking the summary against the actual text would close this, at
+the cost of an extra call per candidate.
 
-**Free-tier disk is ephemeral.** `data/store.db` does not survive a redeploy or instance restart,
-so post history resets. The schema is recreated automatically on boot, so the app always comes back
-clean rather than crashing. To retain history, attach a Render disk and set `DATA_DIR` to its mount
-path — the commented block at the bottom of `render.yaml` has the exact configuration.
+**Source quality is judged from the URL, not the outlet's reputation.** An early live run
+scored a story 98 while citing a content-farm domain, because the judge could only see a Google
+redirect. Redirect resolution fixed that specific hole — the judge now sees the real publisher —
+but there is still no allowlist or reputation signal, so a plausible-looking domain is taken
+at face value.
 
-**Gemini free-tier rate limits.** Each cycle makes two calls. Many agents running concurrently, or
-repeated `/trigger` presses, can hit per-minute limits; the client retries transient failures once
-per model before moving down the chain.
+**There are two separate free-tier quotas, and the smaller one is invisible until it bites.**
 
-**Judging is strict by design.** Acceptance rates of 4–8% are normal and intended — the brief asks
-for real editorial standards. A `/trigger` press that publishes nothing is the system working, not
-failing, and the UI reports it as such.
+*Text generation* is capped per model: `GenerateRequestsPerDayPerProjectPerModel` is **20
+requests per day, per model**, measured on a real key. The model chain is therefore a
+*capacity* strategy rather than just failover — each model brings its own allowance, so six
+usable models give roughly six times the headroom of one.
 
-**No test suite.** Verification during development was done against the live API and a real
-headless browser rather than with unit tests. For a project of this scope that was the honest
-trade-off, but it is the first thing worth adding.
+*Google Search grounding* is metered **separately and project-wide**. This was verified
+directly: the same model, the same key, the same minute — a plain request succeeds and a
+grounded one returns 429. Two consequences that are easy to get wrong:
 
-**Free-tier quota is small and shared per project, per day.** Each cycle costs two Gemini calls.
-Beyond the per-minute cap, the free tier enforces `GenerateRequestsPerDayPerProjectPerModel`,
-which a burst of manual `/trigger` presses can exhaust for the rest of the day; it resets at
-midnight Pacific Time. When this happens the API returns a clean `429` with
-`"code": "QUOTA_EXHAUSTED"` and a human-readable message rather than Google's raw payload, and the
-UI surfaces it as an expected state. The autonomous loop is unaffected in design — it keeps
-ticking and publishes as soon as quota returns, which is well inside the 48-hour window. Adding a
-key from a different Google Cloud project restores capacity immediately.
+- **No fallback model can rescue a grounded call.** Every model draws on the same grounding
+  allowance, so when it is out, discovery cannot run at all. The client detects this case and
+  fails immediately rather than walking the chain and burning six requests to learn nothing.
+  Judging and writing are ungrounded and keep working normally.
+- **Grounding, not generation, caps how many cycles a day you get.** Each cycle makes exactly
+  one grounded call. If grounding is your binding limit, pace on it directly by setting
+  `CYCLE_CALLS_ESTIMATE=1` and `CYCLE_DAILY_CALL_BUDGET=<grounded calls per day>`; the
+  scheduler's arithmetic then works in cycles rather than total calls.
+
+Also worth knowing: **a second API key in the same Google Cloud project shares the same
+exhausted quota.** Quota is per project, not per key. A genuinely fresh allowance means a
+different project, or a paid key.
+
+The cadence stretches with roster size (`CYCLE_DAILY_CALL_BUDGET`, default 100 calls/day):
+one agent stays at 2–3h; six agents spread to ~8–9h, about 6 cycles each over a 48-hour
+window. **Six agents on a free key is thin** — expect a handful of posts each, not a steady
+stream. Two or three agents, or a paid key, is the comfortable configuration.
+
+A burst of manual `/trigger` presses eats the same allowance. When the daily cap is hit the
+API returns a 429 that the client marks `daily: true` and **non-retryable**, so the scheduler
+stops hammering an API that cannot answer until midnight Pacific, and publishing resumes on
+its own once quota returns. `SCORE_THRESHOLD`, `MAX_POSTS_PER_CYCLE`, `MEMORY_POSTS`,
+`CYCLE_DAILY_CALL_BUDGET` and the cadence bounds are all environment variables.
+
+**The mandated free model may have no entitlement.** Some AI Studio projects report
+`limit: 0` on a specific alias — a hard entitlement of zero rather than a transient rate
+limit, so retrying can never succeed. `src/gemini.js` therefore walks a fallback chain and
+sticks with the first model that answers, reported live in `/api/agent/status`. Override
+with `GEMINI_MODEL` / `GEMINI_FALLBACK_MODELS`.
+
+**Acceptance rates are low by design.** A trigger that publishes nothing is the system
+working, not failing, and the UI reports it that way.
+
+**No unit tests.** Verification was done against the running server: endpoint shapes, restart
+persistence, and failure containment were exercised directly (see
+[Verifying it works](#verifying-it-works)). For a project this size that was the honest
+trade-off, but it is the first thing worth adding — `judgeCandidate`'s threshold override,
+`parseLooseJSON`'s repair path, `extractSearchResults`' domain derivation, and `topicKey`'s
+stemming are all pure functions and easy to pin down.

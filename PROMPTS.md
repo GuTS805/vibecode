@@ -154,3 +154,310 @@ triggers an auto-redeploy resets `data/store.db`. The README/PROMPTS update was 
 immediately, while the live instance held only one post, and the demo personas were re-seeded
 afterwards so the 48-hour autonomy window starts from a clean deploy rather than being cut short
 by a later one.
+
+---
+
+## 3 — Rebuild against the Anthropic spec (2026-08-07)
+
+**Request:** the same product, but to a stricter specification — Anthropic API with
+`claude-sonnet-4-6` and the `web_search` tool for discovery, a written-out persona config that
+every prompt references, a *separate* judging call per candidate, a memory check against the
+last ~20 posts before writing, and an automated voice-consistency review. Plus: analyze how much
+progress had already been made.
+
+**What survived.** The architectural half was already right and was kept: the long-lived
+Express process, the `node-cron` 5-minute tick against stored due-times, SQLite with WAL, the
+two required endpoints, the rejection log, and the React dashboard. The LLM half was built for a
+different spec and was replaced wholesale.
+
+**What was replaced.**
+
+- `gemini.js` → `claude.js`. Beyond swapping SDKs this had to handle things the Gemini path
+  never did: `stop_reason: "pause_turn"` continuation (a server-tool turn that hits its internal
+  iteration limit resumes by re-sending with the assistant turn appended), `stop_reason:
+  "refusal"` checked *before* anything reads `response.content`, and error classification via the
+  SDK's typed exception classes rather than string-matching messages — so the scheduler can tell
+  a rate limit (retry in 10 minutes) from a bad API key (retrying cannot help).
+- Discovery: Hacker News + three RSS feeds → one Claude call with the `web_search_20260209`
+  server tool. This trades a deterministic source list for live, beat-aware search, and
+  introduces a failure mode RSS did not have — a plausible-looking URL that never existed. The
+  fix was to check every candidate URL against the URLs the search tool actually returned, then
+  *flag* rather than drop the misses, because silently dropping them would starve the feed. The
+  judge is told, and an unverifiable source fails the credibility standard on the record.
+- Judging: one batched call ranking all candidates → one call per candidate, run concurrently,
+  each reasoning on its own merits. A failure in one is caught and skipped rather than taking the
+  cycle down.
+- The persona: a six-line voice blurb interpolated from `name` + `domain` → `src/persona.json`,
+  a full config with bio, six voice dimensions, five covered topics, five avoided ones, three
+  recurring positions, and a banned-phrase list. It is stored per agent at init, so a restart
+  mid-window resumes with the exact voice it started with.
+
+**Two judgment calls worth recording.**
+
+*Thresholds are enforced in code, not trusted from the model.* The judge returns per-standard
+scores and a decision; `judgeCandidate()` then independently checks overall ≥ 70 and no standard
+below 40, and overrides a `publish` verdict that does not meet them — logging the override in
+the rejection reason. Asking a model to both score and gate is asking it to mark its own work.
+
+*Approved-but-not-published candidates are deferred, not rejected.* With a two-post cap, a good
+third candidate is left in neither table, so it resurfaces next cycle. Logging it as a rejection
+would have been the easier code and a dishonest record.
+
+**Structured outputs were considered and rejected.** `output_config.format` would remove the
+JSON-parsing guesswork entirely, but it is not available on `claude-sonnet-4-6` — the model the
+spec mandates. So the JSON contract stays in the prompts, enforced by `parseLooseJSON()`, which
+strips markdown fences and repairs objects truncated by the output-token limit by walking cut
+points backwards until one parses. Documented in the README as a constraint rather than left as
+a silent workaround.
+
+**Verification.** No Anthropic API key was available in the build environment, so the live-LLM
+half — real posts, real rejections, the voice check — is the operator's to run. Everything else
+was exercised directly: `/init` → `/feed` → `/debug/rejected` → `/persona` shapes, validation and
+404 paths, a genuine cold-process restart confirming posts, rejections, `next_cycle_at` and the
+48-hour window all survived, and a deliberately keyless cycle confirming the scheduler logs the
+failure and keeps ticking. That last test found a real bug: the missing-key error was being
+retried because it carried no `retryable` flag. Fixed.
+
+---
+
+## 4 — Back to Gemini for the free tier (2026-08-08)
+
+**Request:** revert the provider to Gemini — the project needs to run on free APIs.
+
+A cost decision, so the provider layer changed and nothing else did. The persona config,
+per-candidate judging, memory window, voice check, and every endpoint stayed exactly as they
+were; `src/claude.js` was replaced by `src/gemini.js` exporting the same interface
+(`complete` / `completeJSON` / `withRetry` / `parseLooseJSON` / `getActiveModel`), so
+`discovery.js`, `pipeline.js`, `routes.js` and `voice-check.js` needed only an import swap.
+
+**SDK.** `@google/genai` (v2), not the `@google/generative-ai` package the first build used —
+that one is deprecated. Its surface was verified against the shipped typings before any code
+was written rather than recalled: `tools: [{ googleSearch: {} }]`, `config.systemInstruction`,
+`config.thinkingConfig.thinkingBudget`, `response.text`, and grounding at
+`response.candidates[0].groundingMetadata.groundingChunks[].web.{uri,title}`.
+
+**Three things did not port cleanly, and each forced a real change.**
+
+*JSON mode and grounding are mutually exclusive on Gemini.* `responseMimeType:
+'application/json'` alongside `tools` is rejected. So the grounded discovery call uses a
+prompt-stated JSON contract with `parseLooseJSON()` as the safety net, while the ungrounded
+judge and writer calls do use JSON mode. Fragility is confined to the one call that cannot
+avoid it.
+
+*Grounding returns redirect URLs, not publisher links.* `web.uri` is a
+`vertexaisearch.cloud.google.com/grounding-api-redirect/…` link, so the exact-URL check the
+Anthropic build relied on could never match. Verification was rewritten to work on domains,
+derived from `web.title` (normally a bare domain) plus the URI host. This is genuinely weaker
+— it catches an invented domain but not a real domain with an invented path — and the README
+says so under Known constraints instead of leaving the check looking stronger than it is.
+
+*Free-tier quota is a first-class failure mode, not an edge case.* The model fallback chain
+from the first build was reinstated (`gemini-2.5-flash` → `gemini-2.0-flash` →
+`gemini-2.5-flash-lite`, sticky once one answers), because some AI Studio projects report a
+hard `limit: 0` entitlement on an alias that no retry can fix. Beyond that, per-minute and
+per-day 429s are now distinguished: a per-minute cap is retryable and reschedules in ten
+minutes, a daily cap is marked non-retryable so the loop stops hammering an API that will not
+answer until midnight Pacific.
+
+`thinkingConfig` is attached only to 2.5-series models — sending it to `gemini-2.0-flash` is
+an error — so the pipeline's abstract `effort` levels map to thinking budgets on 2.5 and are
+ignored on the fallback.
+
+`render.yaml` went back to `plan: free` to match the intent, with both free-tier caveats
+(sleeping instances, ephemeral disk) documented rather than buried.
+
+**Two incidental defects fixed while here.** `npm --prefix client install` was injecting a
+circular `file:..` self-dependency into the client manifest on every build — with a
+package.json in the working directory, that form means "install the package here *into* that
+prefix". Switched to `cd client && npm install`. And an `npm install` run from a drifted shell
+directory created `node_modules/`, `package.json` and `package-lock.json` at the repository
+root; all three were removed.
+
+**Verification.** Still no API key, so the live-LLM half remains the operator's to run. The
+Gemini layer was unit-checked without one — model chain, `SEARCH_TOOL` shape, JSON fence and
+truncation repair, grounding-metadata extraction against the real response shape including the
+no-grounding and non-web-chunk cases — and the full server was re-exercised end to end:
+`/init`, `/feed`, `/debug/rejected`, `/persona`, the built frontend, SPA fallback, a cold
+restart preserving posts and schedule, and a keyless cycle failing without taking the
+scheduler down.
+
+---
+
+## 5 — First live runs (2026-08-08)
+
+**Request:** an API key, with instructions to use it.
+
+The key did not match the AI Studio `AIza…` format, so it was tested rather than assumed —
+it worked, and grounding worked with it. Every finding below came from running the pipeline
+for real, and none of them would have surfaced from code review.
+
+**Run 1 — the cycle worked, then died on the last call.** Discovery returned 4 candidates
+from 9 grounded sources, per-candidate judging ran, a 503 was retried and succeeded, three
+candidates were rejected and one was approved. Then the write call — the one the whole cycle
+exists to make — failed, because six API calls in forty seconds had exhausted the free tier's
+per-minute quota. Four defects, each a design flaw rather than a typo:
+
+- *Judging ran concurrently via `Promise.all`.* That is what caused the burst. Cycles are
+  hours apart, so parallelism buys nothing and costs the write call. Now sequential, with a
+  ~4s floor between all outbound calls.
+- *The write call had no retry wrapper.* Discovery and judging both had one; the most
+  important call in the cycle was the only unprotected one. Fixed.
+- *Retry backoff was 3s against a per-minute quota.* Useless by construction. Now honours the
+  server's `retry-after`, falling back to ~35s for rate limits.
+- *A 404 named the sticky model rather than the model that failed*, so a dead entry in the
+  fallback chain reported itself as a failure of the primary. Fixed, and a permanently-404
+  model is now dropped from the chain for the life of the process.
+
+Probing the chain directly explained the rest: `gemini-2.5-flash-lite` returns 404 ("no
+longer available to new users") and `gemini-2.0-flash` returns 429 on this key — the
+`limit: 0` entitlement problem from the first build, still present. Both were dead entries.
+The chain is now `gemini-2.5-flash` → `gemini-3.5-flash` → `gemini-flash-latest`.
+
+**Run 2 — it published, and the sources were unusable.** Two posts, both on-beat and in
+voice. But every stored source was a `vertexaisearch.cloud.google.com/grounding-api-redirect/…`
+link: opaque, expiring, and worthless to a reader. Grounding never exposes the publisher's URL.
+
+The first fix was wrong in an instructive way. Telling the model to report "the publisher's
+canonical URL" instead of the redirect made it *reconstruct* URLs from memory — precisely the
+fabrication the verification step exists to catch. Run 3 rejected all four candidates on
+credibility, and the acceptance rate went from 2/4 to 0/4.
+
+The redirect was the trustworthy artifact all along. Inverted: the prompt now demands the
+redirect *verbatim*, and the code follows it to its destination. That resolves to the real
+article **and** is the strongest verification available — a link that resolves provably exists
+and is provably what the search returned. The judge's source note was also over-alarming for
+what had become the normal case, so it now carries three graded states (confirmed / partly
+confirmed / unconfirmed) with an explicit note that partial confirmation is not grounds for
+rejection on its own.
+
+**Run 4 — correct.** Two posts published, one rejected, one deferred, all sources real
+publisher URLs (`thehackernews.com`, `helpnetsecurity.com`, `csoonline.com`). Corroboration
+rose from 1/4 to 3/4 once redirect resolution fed real hosts into the domain check. The model
+chain exercised itself for real: `gemini-2.5-flash` hit its per-minute limit and the cycle
+completed on `gemini-3.5-flash`.
+
+`npm run voice-check` then passed on live output for the first time — 97 and 99 per-post,
+consistency 95/100 — and earned its place by catching something a lint cannot: both posts
+close on the same rhetorical move (a superficial fix named, then dismissed as architectural).
+That is exactly the drift the check exists to surface.
+
+**One editorial weakness surfaced and is documented rather than fixed.** An early run scored a
+story 98 while citing a content-farm domain, because the judge could only see a Google
+redirect. Redirect resolution closes that specific hole — the judge now sees the real
+publisher — but there is still no reputation signal, so a plausible-looking domain is taken at
+face value.
+
+---
+
+## 6 — Expanding the roster (2026-08-08)
+
+**Request:** more agents and topics — history, geography, politics, sports, music.
+
+Five new personas written to the same structure as Ada, who stays (the brief specifies
+AI/tech, and she is what satisfies it; the rest are additive). The work that mattered was
+making them *different* rather than recolours of one voice: each varies sentence length,
+formality, humour, and structure, and each carries its own domain clichés in `bannedPhrases`
+so the lint means something specific per persona — Tobias is blocked from "lost to history",
+Dario from "clutch gene", Wren from "sonic landscape". A check confirmed all six differ on
+every voice axis.
+
+**Politics was scoped deliberately.** An autonomous agent publishing unsupervised political
+opinion is a bad idea, so Ellis analyses process and institutional mechanics — electoral
+systems, procedure, coalition arithmetic — with advocacy, horse-race prediction, and
+personality coverage in the avoid list, plus a post rule forbidding any implied verdict on a
+party or candidate.
+
+Persona resolution gained a middle step: name match, then **domain** match, then the fallback
+template. `{"name":"Bob","domain":"History"}` now returns Tobias's beat and voice under Bob's
+name, which makes the roster reachable without knowing the authored names. `npm run seed`
+starts the whole roster in one command.
+
+**Then the quota reality arrived, in two stages.**
+
+Six agents at a fixed 2–3h cadence would have run the daily quota dry partway through day
+one, so the scheduler now derives its interval from a shared daily call budget: one agent is
+unaffected and stays at 2–3h, six stretch automatically. `/api/agent/status` reports the
+cadence actually in effect rather than a constant, because a hardcoded string would now be a
+lie.
+
+Seeding the roster then exposed a defect the single-agent case never could: all six priming
+cycles fired at the same moment and rate-limited each other, and every one of them failed
+discovery. Priming is now staggered by roster position (3 minutes apart by default).
+
+Finally, probing the 429 payload directly gave the number the whole design hinges on:
+
+```
+quotaId: "GenerateRequestsPerDayPerProjectPerModel-FreeTier"
+quotaValue: "20"    model: gemini-2.5-flash
+```
+
+**Twenty requests per day, per model** — an order of magnitude below the 200-call budget
+assumed an hour earlier, and the correction is load-bearing rather than cosmetic. Because the
+cap is per *model*, the fallback chain became the capacity strategy rather than mere failover:
+it now lists six models, each contributing its own allowance. The budget dropped to 100,
+discovery asks for 3–4 candidates instead of 3–5, and the honest conclusion went into the
+README: six agents on a free key yields roughly six cycles each over 48 hours, which is a
+handful of posts apiece, not a steady stream. Two or three agents, or a paid key, is the
+comfortable configuration.
+
+---
+
+## 7 — Persona picker in the UI (2026-08-08)
+
+**Request:** surface the agents in the frontend so a persona can be selected rather than typed.
+
+The init form was still offering three hardcoded presets — `Ada`, `Turing`, `Grace` — two of
+which no longer existed. It now fetches `/api/personas`, so `src/persona.json` stays the single
+source of truth and the UI cannot drift when a persona is added or renamed. The endpoint was
+enriched to carry a tagline, the covers and avoids lists, and the post length.
+
+The design choice worth recording: the picker shows each persona's **avoid list** alongside what
+it covers, struck through. The avoid list is what makes these personas distinct from one another
+and from a generic writer, and it was previously invisible unless you opened the JSON. Showing
+the editorial contract before you commit to starting an agent seemed more useful than another
+paragraph of bio. Cards also carry a `running` badge, and preselection skips personas that
+already have an agent. The switcher tabs gained the beat under the name, because with six agents
+the names alone stopped being distinguishable.
+
+Verified in headless Chrome rather than by inspection: 13 assertions covering card rendering,
+names and beats, single preselection, the detail panel updating when a different card is
+clicked, the custom option revealing its inputs, and no horizontal overflow at 390px — plus a
+second pass with two agents already running to confirm the badges and the preselection skip.
+`puppeteer-core` was installed for the check and removed afterwards.
+
+---
+
+## 8 — Two quotas, not one (2026-08-08)
+
+**Request:** a second API key, to carry on after the first ran out.
+
+It did not help, and finding out why produced the most consequential correction so far.
+
+**A second key in the same Google Cloud project shares the same exhausted quota.** Quota is
+per project, not per key. The new key returned the same 429 immediately.
+
+Probing the chain then produced a contradiction worth chasing: four of the six models answered
+a plain request, yet every one of them failed the pipeline's discovery call. The controlled
+test — same model, same key, same minute, with and without `tools: [{googleSearch: {}}]` —
+settled it. The plain call succeeded; the grounded call returned 429.
+
+**Google Search grounding is metered separately from text generation, and project-wide rather
+than per-model.** Two things follow, and both were wrong in the code:
+
+- The fallback chain cannot rescue a grounded call. Every model draws on the same grounding
+  allowance, so walking six models to find one that works is guaranteed to fail — it just takes
+  half a minute and six requests to prove it. Grounded 429s are now detected as a distinct
+  `GROUNDING_QUOTA` condition and fail immediately.
+- The error message was actively misleading. "Daily quota is exhausted for this API key" is
+  false when generation is fine and only grounding is out, and it points at the wrong fix. The
+  message now says which quota ran out, that no fallback model can help, that judging and
+  writing still work, and when it resets.
+
+It also means **grounding, not generation, caps cycles per day** — each cycle makes exactly one
+grounded call, so adding models to the chain buys judging and writing headroom but no extra
+cycles. The README and `.env.example` now say so, with the knob settings to pace on grounding
+directly.
+
+**Not verified:** a live cycle for any of the five new personas. Grounding quota was exhausted
+before one could be run, and no configuration change can work around it — it needs either the
+midnight Pacific reset or a different Google Cloud project.

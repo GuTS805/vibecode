@@ -10,6 +10,8 @@ async function req(path, options = {}) {
 }
 
 export const listAgents = () => req('/api/agents');
+/** The personas defined in src/persona.json — powers the picker in the init form. */
+export const listPersonas = () => req('/api/personas');
 export const initAgent = (name, domain) =>
   req('/api/agent/init', { method: 'POST', body: JSON.stringify({ persona: { name, domain } }) });
 export const getFeed = (agentId) => req(`/api/agent/feed?agentId=${encodeURIComponent(agentId)}`);

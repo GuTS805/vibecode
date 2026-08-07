@@ -10,9 +10,17 @@ export default function AgentSwitcher({ agents, activeId, onSelect, onNew }) {
             className={`tab${a.agentId === activeId ? ' tab-active' : ''}`}
             onClick={() => onSelect(a.agentId)}
             aria-current={a.agentId === activeId}
+            title={`${a.name} — ${a.domain}`}
           >
-            <span className="tab-name">{a.name}</span>
-            <span className="tab-count">{a.posts}</span>
+            <span className="tab-label">
+              <span className="tab-name">{a.name}</span>
+              {/* With a full roster the names alone stop being distinguishable, so each tab
+                  carries its beat. */}
+              <span className="tab-beat">{a.domain}</span>
+            </span>
+            <span className="tab-count" title={`${a.posts} published`}>
+              {a.posts}
+            </span>
           </button>
         ))}
       </div>

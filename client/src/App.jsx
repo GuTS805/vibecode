@@ -129,10 +129,14 @@ export default function App() {
       const result = await api.triggerCycle(activeId);
       await loadAgentData(activeId, { silent: true });
       await loadAgents();
+      // `published` is an array — a cycle may publish zero, one, or several posts.
+      const posts = result.published || [];
       setToast(
-        result.published
-          ? `Published: ${result.published.title}`
-          : `Cycle complete — nothing cleared the bar (${result.rejected} rejected).`
+        posts.length === 1
+          ? `Published: ${posts[0].title}`
+          : posts.length > 1
+            ? `Published ${posts.length} posts.`
+            : `Cycle complete — nothing cleared the bar (${result.rejected} rejected).`
       );
     } catch (err) {
       // Free-tier quota exhaustion is an expected condition, not a crash — say so plainly.
@@ -164,6 +168,7 @@ export default function App() {
             onCreate={handleCreate}
             onCancel={() => setShowInit(false)}
             canCancel={agents.length > 0}
+            existingAgents={agents}
           />
         )}
 

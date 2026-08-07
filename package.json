@@ -1,9 +1,9 @@
 {
   "name": "autonomous-persona-agent",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "private": true,
   "type": "module",
-  "description": "An autonomous AI persona that discovers, judges, and publishes tech/AI posts on its own schedule.",
+  "description": "An autonomous AI persona that discovers, judges, and publishes tech/AI posts on its own schedule, powered by Claude with web search.",
   "engines": {
     "node": ">=20"
   },
@@ -11,14 +11,15 @@
     "start": "node src/server.js",
     "dev": "node --watch src/server.js",
     "dev:client": "npm --prefix client run dev",
-    "build": "npm --prefix client install --no-audit --no-fund && npm --prefix client run build"
+    "build": "cd client && npm install --no-audit --no-fund && npm run build",
+    "seed": "node scripts/seed-agents.js",
+    "voice-check": "node scripts/voice-check.js"
   },
   "dependencies": {
-    "@google/generative-ai": "^0.24.1",
+    "@google/genai": "^2.16.0",
     "better-sqlite3": "^11.10.0",
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
-    "node-cron": "^3.0.3",
-    "rss-parser": "^3.13.0"
+    "node-cron": "^3.0.3"
   }
 }

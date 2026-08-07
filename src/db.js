@@ -56,22 +56,39 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_posts_topickey   ON posts(agent_id, topic_key);
 `);
 
+/**
+ * Additive migrations. CREATE TABLE IF NOT EXISTS is a no-op against a database created
+ * by an earlier version, so new columns are added here — a redeploy onto an existing
+ * disk must not lose published posts.
+ */
+function ensureColumn(table, column, ddl) {
+  const exists = db.prepare(`PRAGMA table_info(${table})`).all().some((c) => c.name === column);
+  if (!exists) db.exec(`ALTER TABLE ${table} ADD COLUMN ${ddl}`);
+}
+
+ensureColumn('agents', 'persona_json', 'persona_json TEXT');
+ensureColumn('posts', 'title', 'title TEXT');
+ensureColumn('posts', 'score', 'score INTEGER');
+ensureColumn('rejections', 'url', 'url TEXT');
+ensureColumn('rejections', 'score', 'score INTEGER');
+
 export const nowISO = () => new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
 export const newId = (prefix) => `${prefix}${randomUUID().slice(0, 8)}`;
 
 /* ---------------------------------- agents --------------------------------- */
 
-export function createAgent({ name, domain, personaPrompt, autonomyHours }) {
+export function createAgent({ name, domain, personaPrompt, persona, autonomyHours }) {
   const id = newId('a');
   const now = new Date();
   db.prepare(
-    `INSERT INTO agents (id, name, domain, persona_prompt, created_at, expires_at)
-     VALUES (?, ?, ?, ?, ?, ?)`
+    `INSERT INTO agents (id, name, domain, persona_prompt, persona_json, created_at, expires_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`
   ).run(
     id,
     name,
     domain,
     personaPrompt,
+    JSON.stringify(persona),
     now.toISOString(),
     new Date(now.getTime() + autonomyHours * 3600_000).toISOString()
   );
@@ -80,6 +97,18 @@ export function createAgent({ name, domain, personaPrompt, autonomyHours }) {
 
 export const getAgent = (id) => db.prepare('SELECT * FROM agents WHERE id = ?').get(id);
 export const listAgents = () => db.prepare('SELECT * FROM agents ORDER BY created_at ASC').all();
+
+/**
+ * The persona config is stored per agent, so a restart mid-window resumes with the exact
+ * voice it was initialized with even if persona.json is edited in the meantime.
+ */
+export function loadPersona(agent) {
+  try {
+    const parsed = JSON.parse(agent.persona_json);
+    if (parsed && parsed.voice && parsed.post) return parsed;
+  } catch { /* fall through */ }
+  throw new Error(`Agent ${agent.id} has no usable persona config stored.`);
+}
 
 /** When the next autonomous cycle is due. */
 export function setNextCycle(agentId, nextCycleAt) {
@@ -94,15 +123,16 @@ export function touchLastCycle(agentId) {
 
 /* ---------------------------------- posts ---------------------------------- */
 
-export function insertPost({ agentId, text, rationale, sources, topicKey, tag }) {
+export function insertPost({ agentId, title, text, rationale, sources, topicKey, tag, score }) {
   const id = newId('p');
   db.prepare(
-    `INSERT INTO posts (id, agent_id, text, rationale, sources, topic_key, tag, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-  ).run(id, agentId, text, rationale, JSON.stringify(sources || []), topicKey, tag, nowISO());
+    `INSERT INTO posts (id, agent_id, title, text, rationale, sources, topic_key, tag, score, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(id, agentId, title, text, rationale, JSON.stringify(sources || []), topicKey, tag, score, nowISO());
   return id;
 }
 
+/** Published posts are only ever read and appended — never updated or deleted. */
 export function getPosts(agentId) {
   return db
     .prepare('SELECT * FROM posts WHERE agent_id = ? ORDER BY datetime(created_at) DESC, rowid DESC')
@@ -119,12 +149,12 @@ export function getPosts(agentId) {
 
 /* -------------------------------- rejections -------------------------------- */
 
-export function insertRejection({ agentId, topic, reason, topicKey }) {
+export function insertRejection({ agentId, topic, reason, topicKey, url, score }) {
   const id = newId('r');
   db.prepare(
-    `INSERT INTO rejections (id, agent_id, topic, reason, topic_key, created_at)
-     VALUES (?, ?, ?, ?, ?, ?)`
-  ).run(id, agentId, topic, reason, topicKey, nowISO());
+    `INSERT INTO rejections (id, agent_id, topic, reason, topic_key, url, score, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(id, agentId, topic, reason, topicKey, url, score, nowISO());
   return id;
 }
 
@@ -132,22 +162,47 @@ export function getRejections(agentId) {
   return db
     .prepare('SELECT * FROM rejections WHERE agent_id = ? ORDER BY datetime(created_at) DESC, rowid DESC')
     .all(agentId)
-    .map((r) => ({ id: r.id, createdAt: r.created_at, topic: r.topic, reason: r.reason }));
+    .map((r) => ({
+      id: r.id,
+      createdAt: r.created_at,
+      topic: r.topic,
+      reason: r.reason,
+      url: r.url || null,
+      score: r.score ?? null,
+    }));
 }
 
 /* ---------------------------------- memory ---------------------------------- */
 
-/** Everything the agent has already published or rejected — its long-term memory. */
+/** How many published posts the agent carries into discovery, judging, and writing. */
+const MEMORY_POSTS = Number(process.env.MEMORY_POSTS || 20);
+
+/**
+ * Everything the agent remembers: recent published posts in full enough detail to avoid
+ * repeating itself, plus the topic keys of every story it has already published or
+ * rejected, so those never reach a judging call again.
+ */
 export function getMemory(agentId) {
   const published = db
-    .prepare('SELECT text, topic_key FROM posts WHERE agent_id = ? ORDER BY rowid DESC LIMIT 40')
-    .all(agentId);
-  const rejected = db
-    .prepare('SELECT topic, topic_key FROM rejections WHERE agent_id = ? ORDER BY rowid DESC LIMIT 40')
-    .all(agentId);
+    .prepare('SELECT title, text, topic_key, created_at FROM posts WHERE agent_id = ? ORDER BY rowid DESC LIMIT ?')
+    .all(agentId, MEMORY_POSTS);
+
+  const allKeys = db
+    .prepare(
+      `SELECT topic_key FROM posts WHERE agent_id = ?
+       UNION
+       SELECT topic_key FROM rejections WHERE agent_id = ?`
+    )
+    .all(agentId, agentId);
+
   return {
-    publishedSummaries: published.map((p) => p.text.slice(0, 180)),
-    seenKeys: new Set([...published, ...rejected].map((r) => r.topic_key).filter(Boolean)),
+    publishedSummaries: published.map((p) => ({
+      createdAt: (p.created_at || '').slice(0, 10),
+      title: p.title || p.text.slice(0, 80),
+      excerpt: p.text.slice(0, 180),
+    })),
+    publishedTopics: published.map((p) => p.title).filter(Boolean),
+    seenKeys: new Set(allKeys.map((r) => r.topic_key).filter(Boolean)),
   };
 }
 

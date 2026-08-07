@@ -105,6 +105,9 @@ h1, h2, h3 { font-family: var(--font-display); margin: 0; letter-spacing: -.01em
   padding: 1px 7px;
   border-radius: 999px;
 }
+.tab-label { display: inline-flex; flex-direction: column; align-items: flex-start; line-height: 1.25; }
+.tab-beat { font-size: 10.5px; color: var(--text-faint); font-weight: 400; }
+.tab-active .tab-beat { color: var(--accent); }
 
 /* ---------------------------------- header --------------------------------- */
 .header {
@@ -397,6 +400,84 @@ h1, h2, h3 { font-family: var(--font-display); margin: 0; letter-spacing: -.01em
 .preset-row { display: flex; flex-wrap: wrap; gap: 7px; }
 .form-actions { display: flex; gap: 9px; }
 .form-error { margin: 0; color: #f87171; font-size: 13px; }
+
+/* ------------------------------ persona picker ----------------------------- */
+.field-label {
+  font-size: 12px;
+  color: var(--text-faint);
+  text-transform: uppercase;
+  letter-spacing: .04em;
+}
+
+/* auto-fit rather than a fixed column count, so the roster reflows from three columns
+   down to one without a media query as the panel narrows. */
+.persona-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(190px, 1fr));
+  gap: 9px;
+}
+
+.persona-card {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 12px 13px;
+  text-align: left;
+  border-radius: 11px;
+  border: 1px solid var(--border);
+  background: var(--bg-elev);
+  color: var(--text-dim);
+  font: 400 13px var(--font-body);
+  cursor: pointer;
+  transition: background .18s, border-color .18s, transform .18s;
+}
+.persona-card:hover:not(:disabled) { background: var(--card-hover); border-color: var(--accent-dim); }
+.persona-card:disabled { opacity: .55; cursor: default; }
+.persona-card-active {
+  background: rgba(110, 168, 254, .1);
+  border-color: var(--accent-dim);
+  box-shadow: 0 0 0 3px rgba(110, 168, 254, .1);
+}
+.persona-card:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.persona-card-custom { border-style: dashed; }
+
+.persona-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.persona-name { font-size: 15px; font-weight: 600; color: var(--text); }
+.persona-live {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: .05em;
+  color: #4ade80;
+  border: 1px solid rgba(74, 222, 128, .35);
+  background: rgba(74, 222, 128, .1);
+  padding: 1px 6px;
+  border-radius: 999px;
+}
+.persona-role { font-size: 12px; color: var(--text-dim); }
+.persona-beat { font-size: 11.5px; color: var(--accent); font-weight: 500; }
+.persona-tagline { font-size: 12px; color: var(--text-faint); line-height: 1.45; margin-top: 3px; }
+
+.persona-detail {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(210px, 1fr));
+  gap: 14px;
+  padding: 13px 15px;
+  border-radius: 11px;
+  border: 1px solid var(--border-soft);
+  background: rgba(255, 255, 255, .015);
+}
+.detail-label {
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: .05em;
+  color: var(--text-faint);
+}
+.detail-list { margin: 6px 0 0; padding-left: 16px; font-size: 12.5px; color: var(--text-dim); line-height: 1.5; }
+.detail-list li { margin-bottom: 3px; }
+.detail-list-neg li { color: var(--text-faint); text-decoration: line-through; text-decoration-color: rgba(248, 113, 113, .5); }
+.detail-foot { grid-column: 1 / -1; margin: 0; }
+
+.custom-fields { display: flex; flex-direction: column; gap: 13px; }
 
 /* ------------------------------- empty state ------------------------------- */
 .empty-state { text-align: center; padding: 40px 22px; }
