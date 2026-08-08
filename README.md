@@ -633,3 +633,19 @@ resolves to the same artwork. Generation is verified at publish time — the res
 real image over 1KB — so a broken URL is never written into an append-only feed. The tradeoff
 is that images depend on Pollinations remaining reachable; the card hides the image entirely
 on load failure rather than showing a broken icon.
+
+**Feed discovery only covers tech and security.** `src/feeds.js` pulls Hacker News plus ten
+security and AI feeds, which serves Ada and any AI/security persona well. It cannot serve the
+History, Geography, Politics, Sports, or Music personas — there is no feed in the list that
+would ever carry their beats, so those depend on grounded search, which runs its own queries
+per persona. If grounding is unavailable *and* a non-tech persona is running, that persona
+will correctly find nothing and publish nothing. Adding per-persona feed lists is the obvious
+extension.
+
+**Candidate quality is the real constraint on publishing, not the editorial bar.** With only
+general tech feeds, a specialist beat sees mostly secondary reporting on product
+announcements, which SUBSTANCE and CREDIBILITY reject on sight — observed as 0 published
+across 12 candidates. Adding security-specific outlets that publish daily produced an approved
+candidate on the next cycle without changing any threshold. If you want more posts, add
+sources before you lower `SCORE_THRESHOLD`; loosening the bar buys volume by giving up the
+thing that makes the feed worth reading.

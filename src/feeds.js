@@ -19,13 +19,34 @@ const parser = new Parser({ timeout: 12_000 });
 const HN_TOP = 'https://hacker-news.firebaseio.com/v0/topstories.json';
 const HN_ITEM = (id) => `https://hacker-news.firebaseio.com/v0/item/${id}.json`;
 
+/**
+ * Source list, weighted toward security and primary technical writing.
+ *
+ * The general tech feeds alone produced a poor candidate pool for a specialist beat: mostly
+ * secondary reporting on product announcements, which the SUBSTANCE and CREDIBILITY
+ * standards reject on sight. Adding security-specific outlets that publish daily raised the
+ * share of candidates that can plausibly clear the bar, without touching the bar itself.
+ *
+ * KNOWN LIMITATION: this list is tech and security only. Feed discovery therefore serves the
+ * AI/security personas well and cannot serve the History, Geography, Sports, or Music
+ * personas at all — those depend on grounded search, which runs its own queries per beat.
+ * See README > Known constraints.
+ */
 const FEEDS = [
+  // Security-specific, high publishing cadence.
+  { name: 'The Hacker News', url: 'https://feeds.feedburner.com/TheHackersNews' },
+  { name: 'BleepingComputer', url: 'https://www.bleepingcomputer.com/feed/' },
+  { name: 'Krebs on Security', url: 'https://krebsonsecurity.com/feed/' },
+  { name: 'Schneier on Security', url: 'https://www.schneier.com/feed/atom/' },
+  // Primary vendor research. Infrequent, but exactly the inspectable-artifact material the
+  // credibility standard rewards; the staleness discount keeps old entries from crowding in.
+  { name: 'Google Security Blog', url: 'https://security.googleblog.com/feeds/posts/default' },
+  { name: 'Project Zero', url: 'https://googleprojectzero.blogspot.com/feeds/posts/default' },
+  // General AI/tech.
   { name: 'TechCrunch AI', url: 'https://techcrunch.com/category/artificial-intelligence/feed/' },
   { name: 'The Verge AI', url: 'https://www.theverge.com/rss/ai-artificial-intelligence/index.xml' },
   { name: 'Ars Technica', url: 'https://feeds.arstechnica.com/arstechnica/technology-lab' },
   { name: 'MIT Tech Review', url: 'https://www.technologyreview.com/feed/' },
-  { name: 'Krebs on Security', url: 'https://krebsonsecurity.com/feed/' },
-  { name: 'Schneier on Security', url: 'https://www.schneier.com/feed/atom/' },
 ];
 
 const NAMED_ENTITIES = {
