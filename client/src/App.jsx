@@ -358,6 +358,11 @@ export default function App() {
                       onTrigger={handleTrigger}
                       busy={busy}
                       cadence={status?.cycleCadence}
+                      author={{
+                        name: activeAgent?.name || status?.persona?.name,
+                        role: persona?.role,
+                        domain: activeAgent?.domain || status?.persona?.domain,
+                      }}
                     />
                   )}
                   {tab === 'rejected' && (

@@ -56,7 +56,7 @@ function EmptyState({ onTrigger, busy, cadence, state = 'active' }) {
   );
 }
 
-export default function Feed({ posts, loading, error, newIds, onTrigger, busy, cadence, state }) {
+export default function Feed({ posts, loading, error, newIds, onTrigger, busy, cadence, state, author }) {
   if (loading && !posts.length) {
     return (
       <div className="feed">
@@ -81,7 +81,7 @@ export default function Feed({ posts, loading, error, newIds, onTrigger, busy, c
   return (
     <div className="feed">
       {posts.map((p) => (
-        <PostCard key={p.id} post={p} isNew={newIds.has(p.id)} />
+        <PostCard key={p.id} post={p} isNew={newIds.has(p.id)} author={author} />
       ))}
     </div>
   );

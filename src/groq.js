@@ -39,6 +39,48 @@ const FALLBACK_MODELS = (
 const CHAIN = [PRIMARY_MODEL, ...FALLBACK_MODELS.filter((m) => m !== PRIMARY_MODEL)];
 
 /**
+ * The model each kind of call starts from.
+ *
+ * A cycle makes six judging calls and one or two writes, and the binding free-tier limit is
+ * tokens per minute. Left to one shared chain, the judging calls spend the primary model's
+ * whole minute and the write — the only call whose output a reader ever sees — lands on
+ * whatever is left. Observed directly: a music cycle judged six candidates, exhausted
+ * gpt-oss-120b and llama-3.3-70b, and wrote the published post on llama-3.1-8b-instant, the
+ * weakest model in the chain. The post was visibly flatter than the same pipeline's output
+ * an hour earlier.
+ *
+ * Judging is the cheaper call to degrade: it returns a score and a sentence, and the
+ * thresholds are enforced in code afterwards either way. So judging starts one rung down and
+ * the primary model stays reserved for writing.
+ */
+const ROLE_MODELS = {
+  judge: process.env.GROQ_JUDGE_MODEL || FALLBACK_MODELS[0] || PRIMARY_MODEL,
+  write: process.env.GROQ_WRITE_MODEL || PRIMARY_MODEL,
+};
+
+/**
+ * When a model was last rate-limited, so the next call can skip it rather than spend a
+ * request rediscovering it. Without this, reserving a model per role would mean every call
+ * re-probes a saturated model before falling through.
+ */
+const coolUntil = new Map();
+const COOL_MS = Number(process.env.GROQ_COOLDOWN_MS || 30_000);
+
+/**
+ * The order to try models in for this call: the role's model first, then the rest of the
+ * chain. Models known to be rate-limited go to the back rather than being dropped, so a
+ * fully-saturated chain still makes an attempt instead of failing without one.
+ */
+function orderFor(role) {
+  const preferred = ROLE_MODELS[role];
+  const ranked = [preferred, ...CHAIN.filter((m) => m !== preferred)].filter(Boolean);
+  const now = Date.now();
+  const ready = ranked.filter((m) => (coolUntil.get(m) ?? 0) <= now);
+  const cooling = ranked.filter((m) => (coolUntil.get(m) ?? 0) > now);
+  return [...ready, ...cooling];
+}
+
+/**
  * Spacing between calls.
  *
  * The binding free-tier limit is tokens-per-minute, not requests. A cycle fires six judging
@@ -143,6 +185,7 @@ export async function groqComplete({
   temperature = 0.8,
   json = false,
   label = 'call',
+  role = 'default',
   timeoutMs = 90_000,
 }) {
   getKey();
@@ -151,7 +194,10 @@ export async function groqComplete({
   if (system) messages.push({ role: 'system', content: system });
   messages.push({ role: 'user', content: prompt });
 
-  const order = activeModel ? [activeModel, ...CHAIN.filter((m) => m !== activeModel)] : CHAIN;
+  // Ordering is per role rather than sticky on the last model that happened to answer.
+  // Stickiness pinned the writer to whichever weak model the judging calls had degraded to,
+  // which is precisely backwards: the write is the call that most needs the good model.
+  const order = orderFor(role);
   const started = Date.now();
   let lastErr;
 
@@ -201,6 +247,7 @@ export async function groqComplete({
         throw e;
       }
 
+      coolUntil.delete(model);
       if (activeModel !== model) {
         console.log(`[groq] using model: ${model}`);
         activeModel = model;
@@ -229,6 +276,13 @@ export async function groqComplete({
         });
       } else {
         lastErr = err.code ? err : classify(500, err.message, model, null);
+      }
+
+      if (lastErr.code === 'RATE_LIMITED') {
+        // Remember it so the next call skips straight past rather than spending a request
+        // to rediscover the same limit. `retry-after` is authoritative when present.
+        const until = Date.now() + Math.max((lastErr.retryAfter ?? 0) * 1000, COOL_MS);
+        coolUntil.set(model, lastErr.daily ? Date.now() + 3_600_000 : until);
       }
 
       if (!shouldTryNextModel(lastErr)) throw lastErr;

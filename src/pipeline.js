@@ -7,8 +7,30 @@ import { getMemory, insertPost, insertRejection, getAgent, loadPersona } from '.
 /** At most this many posts per cycle, so a rich news day does not arrive as a burst. */
 const MAX_POSTS_PER_CYCLE = Number(process.env.MAX_POSTS_PER_CYCLE || 2);
 
-/** A candidate must clear this to be publishable at all. */
-const SCORE_THRESHOLD = Number(process.env.SCORE_THRESHOLD || 70);
+/** A candidate must clear this to be publishable on its own merits. */
+const SCORE_THRESHOLD = Number(process.env.SCORE_THRESHOLD || 58);
+
+/** No single standard may fall below this, whatever the overall score says. */
+const STANDARD_FLOOR = Number(process.env.STANDARD_FLOOR || 30);
+
+/**
+ * The floor for the rescue path below. A cycle that judged real candidates and approved
+ * none publishes its best one anyway, provided that one is on-beat and not actively bad.
+ */
+const RESCUE_SCORE = Number(process.env.RESCUE_SCORE || 42);
+
+/**
+ * Set ALLOW_EMPTY_CYCLE=true to restore the original strict behaviour, where a cycle in
+ * which nothing clears the threshold publishes nothing at all.
+ *
+ * The default is false because the strict reading produced permanent shutouts rather than
+ * occasional quiet cycles: the standards are absolute, so a beat whose feed simply has no
+ * five-alarm story today fails all of them every cycle, forever, and the feed stays empty
+ * while the logs report a healthy run. Publishing the best available candidate — clearly
+ * scored, and only when it is genuinely on-beat — is the difference between an editor
+ * having a slow news day and an editor who never files.
+ */
+const ALLOW_EMPTY_CYCLE = process.env.ALLOW_EMPTY_CYCLE === 'true';
 
 /** Set POST_IMAGES=false to publish text-only and skip image generation entirely. */
 const IMAGES_ENABLED = process.env.POST_IMAGES !== 'false';
@@ -93,6 +115,12 @@ function judgePrompt(persona, candidate, memory) {
 
   return `Decide whether to publish a post about this candidate. You are the editor here, not the writer.
 
+You are running a live feed and your readers expect it to be worth checking. Your job is to
+find the story worth writing about, not to prove how selective you are. Reject what is
+genuinely off your beat, stale, or empty — and publish what is merely ordinary but real. A
+solid, on-beat, current story with something concrete in it is publishable even when it is
+not the biggest story of the year. Most stories are not.
+
 CANDIDATE
 Title:       ${candidate.title}
 Summary:     ${candidate.summary}
@@ -106,35 +134,37 @@ Source check: ${sourceNote}
 YOUR LAST ${memory.publishedSummaries.length} PUBLISHED POSTS
 ${published}
 
-EDITORIAL STANDARDS — score each 0-100 and apply them strictly.
-Rejecting is the normal outcome. A cycle that publishes nothing is a working cycle.
+EDITORIAL STANDARDS — score each 0-100. Use the full range: 50 is an ordinary, publishable
+story, not a failing grade. Reserve scores under 40 for candidates with a real defect you
+can name.
 
-1. BEAT FIT — Does this sit inside the topics you cover, specifically? "It is about
-   technology" is not fit. If it lands in your do-not-cover list, this score is under 30
-   and the decision is reject regardless of everything else.
+1. BEAT FIT — Does this sit inside the topics you cover? It does not have to be a perfect
+   match for your narrowest specialism; adjacent stories you have a genuine angle on
+   count. Only score this under 40 if it lands in your do-not-cover list or you would have
+   nothing of your own to say about it.
 
-2. SUBSTANCE — Is there a real development: a disclosure, a result, a shipped artifact,
-   an incident, a policy change with operational consequences? Reject announcement-only
-   news, opinion churn, listicles, funding noise with no technical detail, and
-   "X is coming" speculation. An announcement with nothing anyone can inspect scores low
-   here even when the subject matter is squarely on your beat.
+2. SUBSTANCE — Is there something concrete here: a disclosure, a result, a shipped
+   artifact, an incident, a policy change with operational consequences, a decision with
+   real effects? Pure opinion churn, listicles, and "X is coming" speculation score low.
+   An ordinary but real development scores around 55-65 — that is a pass, not a failure.
 
-3. NOVELTY vs YOUR OWN ARCHIVE — Compare against the published posts above. Reject
-   anything that repeats a story you covered, or that is a follow-up adding nothing your
-   readers do not already have from you. Being new to the world is not enough; it has to
-   be new relative to what you have already said.
+3. NOVELTY vs YOUR OWN ARCHIVE — Compare against the published posts above. Score low only
+   if this repeats a story you already covered or adds nothing to it. A story that is
+   simply new to your feed scores well here; it does not have to be new to the world.
 
-4. SOURCE CREDIBILITY — Is the source primary and checkable? A vendor advisory, paper,
-   or disclosure writeup outranks a secondary report, which outranks an aggregator. Weigh
-   the source check above: an unverifiable URL is a serious credibility problem, because
-   you would be citing something you cannot confirm exists.
+4. SOURCE CREDIBILITY — Is the source checkable? A vendor advisory, paper, or disclosure
+   writeup outranks a secondary report, which outranks an aggregator — but a named,
+   reputable outlet reporting a story is credible enough to write about. Weigh the source
+   check above: only a genuinely unverifiable URL is a serious credibility problem.
 
 5. TIMELINESS — Is there a reason to write this now rather than last month? Recent and
    consequential beats recent and trivial. An older item needs real significance to pass.
 
 DECISION RULE
-Publish only if it clears every standard and the overall score is at least ${SCORE_THRESHOLD}.
-Any single standard scoring under 40 means reject.
+Publish if the overall score is at least ${SCORE_THRESHOLD} and no standard is below ${STANDARD_FLOOR}.
+When several candidates in a batch are merely decent, that is still a publishable batch —
+the writer's angle is what makes an ordinary story worth reading, and that is their job,
+not yours. Reject when the story is off your beat, already covered by you, or hollow.
 
 Return ONLY JSON in exactly this shape:
 {
@@ -142,9 +172,9 @@ Return ONLY JSON in exactly this shape:
   "overall": <int, your holistic score — not necessarily the mean>,
   "decision": "publish" | "reject",
   "reason": "<ONE specific sentence. If rejecting, name the standard it failed and why, referring to this story's specifics — never a generic sentence that could apply to any candidate.>",
-  "rationale": "<2-4 sentences, only if publishing: why this topic earns a post, why it matters right now, and what it adds beyond what you have already published. Empty string if rejecting.>",
+  "rationale": "<2-4 sentences: why this topic earns a post, why it matters right now, and what it adds beyond what you have already published. Fill this in even when you are rejecting — write the best case that could be made for the story — because the strongest candidate of a weak batch may still be run.>",
   "tag": "<1-2 word category, e.g. 'Prompt Injection', 'Supply Chain', 'Disclosure', 'Policy'>",
-  "angle": "<one sentence, only if publishing: the specific claim the post should lead with>"
+  "angle": "<one sentence: the specific claim a post should lead with. Fill this in even when rejecting, for the same reason.>"
 }`;
 }
 
@@ -159,21 +189,45 @@ const STANDARDS = ['beatFit', 'substance', 'novelty', 'credibility', 'timeliness
  * Detected by shape rather than by provider: if every score present is <= 10 and at least
  * one is non-zero, the whole set is an order of magnitude out and gets scaled.
  */
-function normalizeScores(data) {
+export function normalizeScores(data) {
   const scores = { ...(data?.scores || {}) };
   const rawOverall = Number.isFinite(data?.overall) ? data.overall : 0;
 
-  const present = [...STANDARDS.map((k) => Number(scores[k])), rawOverall].filter(Number.isFinite);
-  const nonZero = present.filter((v) => v > 0);
-  const tenPointScale = nonZero.length > 0 && present.every((v) => v <= 10);
+  const subs = STANDARDS.map((k) => Number(scores[k])).filter(Number.isFinite);
+  const onTenScale = (values) => values.length > 0 && values.some((v) => v > 0) && values.every((v) => v <= 10);
 
-  if (!tenPointScale) return { scores, overall: rawOverall };
-
-  console.warn('[judge] scores returned on a 0-10 scale; rescaling to 0-100');
-  for (const k of STANDARDS) {
-    if (Number.isFinite(Number(scores[k]))) scores[k] = Number(scores[k]) * 10;
+  // The two are judged separately rather than as one set, because they drift apart: a model
+  // that scores the five standards out of 100 and then answers `overall: 8` meaning
+  // "excellent" is common, and treating the set as a whole leaves that 8 unscaled. It then
+  // fails the threshold with every standard in the 80s — a shutout that looks exactly like
+  // strict editing and is impossible to tell apart from one in the logs.
+  const subsAreTenScale = onTenScale(subs);
+  if (subsAreTenScale) {
+    for (const k of STANDARDS) {
+      if (Number.isFinite(Number(scores[k]))) scores[k] = Number(scores[k]) * 10;
+    }
   }
-  return { scores, overall: rawOverall * 10 };
+
+  // After any rescaling above, the standards are the reference: an overall of 8 sitting
+  // beneath standards averaging 78 is a scale mismatch, not a damning verdict.
+  const normalizedSubs = STANDARDS.map((k) => Number(scores[k])).filter(Number.isFinite);
+  const subMean = normalizedSubs.length
+    ? normalizedSubs.reduce((a, b) => a + b, 0) / normalizedSubs.length
+    : null;
+
+  const overallIsTenScale =
+    rawOverall > 0 && rawOverall <= 10 && (subMean === null ? subsAreTenScale : subMean > 20);
+
+  const overall = overallIsTenScale ? rawOverall * 10 : rawOverall;
+
+  if (subsAreTenScale || overallIsTenScale) {
+    console.warn(
+      `[judge] rescaled 0-10 answer to 0-100 (standards: ${subsAreTenScale ? 'yes' : 'no'}, ` +
+        `overall: ${overallIsTenScale ? 'yes' : 'no'})`
+    );
+  }
+
+  return { scores, overall };
 }
 
 async function judgeCandidate(persona, candidate, memory) {
@@ -185,6 +239,9 @@ async function judgeCandidate(persona, candidate, memory) {
         maxTokens: 3000,
         effort: 'medium',
         label: `judge:${candidate.key.slice(0, 24)}`,
+        // Judging deliberately starts one model down the chain, so the six judging calls in
+        // a cycle cannot spend the token budget the single write call needs.
+        role: 'judge',
       }),
     { attempts: 2, label: `judge ${candidate.key}` }
   );
@@ -195,18 +252,56 @@ async function judgeCandidate(persona, candidate, memory) {
   // The thresholds are enforced here rather than trusted from the model, so a verdict
   // of "publish" attached to a failing score cannot slip through.
   const values = STANDARDS.map((k) => Number(scores[k]) || 0);
-  const meetsBar = overall >= SCORE_THRESHOLD && values.every((v) => v >= 40);
+  const meetsBar = overall >= SCORE_THRESHOLD && values.every((v) => v >= STANDARD_FLOOR);
 
   return {
     decision: modelSaysPublish && meetsBar ? 'publish' : 'reject',
     overriddenByThreshold: modelSaysPublish && !meetsBar,
     scores,
     overall,
+    beatFit: Number(scores.beatFit) || 0,
     reason: String(data?.reason || 'No reason returned by the judge.').trim(),
     rationale: String(data?.rationale || '').trim(),
     tag: String(data?.tag || '').trim() || null,
     angle: String(data?.angle || '').trim(),
   };
+}
+
+/**
+ * The best candidate worth running when nothing cleared the publish threshold.
+ *
+ * The two gates are what keep this from becoming "publish anything". Beat fit must be
+ * genuinely there, because a post outside the persona's beat is worse than no post — it
+ * breaks the one promise the feed makes. And the overall score must clear RESCUE_SCORE, so
+ * a batch that is uniformly worthless still produces an empty cycle, which is the correct
+ * outcome for that batch. Returns undefined when nothing qualifies.
+ */
+export function pickRescue(declined) {
+  return [...declined]
+    .filter(({ verdict }) => verdict.beatFit >= 40 && verdict.overall >= RESCUE_SCORE)
+    .sort((a, b) => b.verdict.overall - a.verdict.overall)[0];
+}
+
+/**
+ * Fill in the reasoning a rescued candidate needs before it can be written.
+ *
+ * The judge is asked to supply a rationale and an angle even when it rejects, precisely so
+ * this path has something to work with — but instruction-following is not guaranteed, and
+ * the writer cannot produce a post from an empty angle. These fallbacks are built from the
+ * story itself so the writer still gets a specific instruction rather than a blank field.
+ */
+function rescueNarrative({ candidate, verdict }) {
+  const rationale =
+    verdict.rationale ||
+    `${candidate.publisher} reports this and it sits on the beat, so it is worth a short read ` +
+      `even though it is not the strongest story of the day. The value here is the interpretation, ` +
+      `not the news itself.`;
+
+  const angle =
+    verdict.angle ||
+    `What ${candidate.title} actually means for someone working on this, stripped of the framing it arrived in.`;
+
+  return { rationale, angle };
 }
 
 /* ---------------------------------- writing ----------------------------------- */
@@ -277,6 +372,8 @@ export async function writePost(persona, candidate, verdict, memory, format) {
       maxTokens: 2500,
       effort: 'low',
       label,
+      // The one call whose output a reader actually sees; it gets the best model available.
+      role: 'write',
     });
     return {
       text: clean(data?.text),
@@ -365,52 +462,101 @@ export function stripNegations(brief) {
     .trim();
 }
 
-/** Words that carry no visual meaning and would only dilute the subject anchor. */
-const ANCHOR_STOPWORDS = new Set([
-  'the', 'and', 'for', 'with', 'from', 'that', 'this', 'into', 'over', 'after', 'says',
-  'said', 'can', 'was', 'were', 'has', 'have', 'been', 'its', 'their', 'new', 'how', 'why',
-  'what', 'when', 'more', 'than', 'out', 'via', 'about', 'could', 'would', 'will', 'may',
-]);
+/**
+ * Concrete visual scenes, matched against what the story is actually about.
+ *
+ * The previous anchor took the headline's significant words and pasted them into the image
+ * prompt — "openai gpt-5 disclosure patch". That does not work, for two compounding reasons.
+ * A diffusion model has no idea what a "disclosure" looks like, so those tokens contribute
+ * nothing but noise; and proper nouns and abstract nouns in a prompt are precisely what
+ * `sana` renders as garbled pseudo-lettering across the image. The result was artwork that
+ * was both generic and covered in fake text.
+ *
+ * Each entry maps a subject to physical objects that can actually be drawn, chosen from the
+ * classes that render cleanly — metal, cable, glass, light, liquid, mechanism — and never
+ * from the classes that carry writing in real life. The matching is deliberately ordered:
+ * the more specific patterns sit first, so "model weights leaked" resolves to the weights
+ * scene rather than the generic breach scene.
+ */
+const VISUAL_CONCEPTS = [
+  // Tier 1 — terms that mean one thing only, whatever beat the story came from.
+  [/prompt inject|jailbreak|indirect inject/, 'a hairline crack splitting a thick pane of armoured glass, a thin bright filament threading through the crack from the far side'],
+  [/supply chain|dependency confusion|package registry|\bnpm\b|\bpypi\b/, 'a chain of machined steel links running into darkness, one link in the centre visibly counterfeit and softening open'],
+  [/model weight|checkpoint|deserializ|safetensors/, 'stacked slabs of dark translucent glass glowing faintly from within, one slab slid out of alignment'],
+  [/ransomware|malware|trojan|backdoor|botnet|phishing/, 'a heavy brass lock cut clean through, the shackle lying open on brushed steel, fine metal dust around the cut'],
+  [/\bcve\b|zero-day|vulnerab|exploit(ed|ation)?\b|security advisory|patch(ed|es)?\b/, 'a precision-machined metal panel with one bolt sheared off, the hole beneath it dark and open'],
+  [/breach|exfiltrat|data leak|leaked data|stolen (data|records)|exposed (data|records)/, 'a bundle of fibre-optic cables torn free of a sealed metal housing, light bleeding from the severed ends'],
+  [/sandbox|credential|api key|access token|privilege escalation/, 'a bank of heavy latches on a steel bulkhead, most sealed shut, one swung fully open'],
+  [/\bchip\b|\bgpu\b|silicon|semiconductor|nvidia|wafer|fabricat/, 'a silicon wafer under raking light, its concentric circuitry catching the beam, held in a steel vacuum arm'],
+  [/data ?cent(re|er)|server (rack|farm)|cloud (outage|region)|infrastructure outage/, 'a dense wall of cabling and cooling pipes in a machine hall, condensation beading on the metal'],
+  [/quantum|cryptograph|encryption|key exchange/, 'a lattice of thin brass rods suspended in cold blue light, frost forming along the lower rods'],
+
+  // Tier 2 — subject domains. These sit above the general technology vocabulary below,
+  // because that vocabulary is full of words that mean something else entirely outside
+  // tech: a WWII story about a tunnel network is not about fibre optics, and a football
+  // story about a training camp is not about model training.
+  [/music|album|\bsong\b|\bband\b|concert|recording artist|\bgig\b/, 'a close-up of a vibrating steel string over a lacquered wooden body, dust lifting off it'],
+  [/sport|football|soccer|basketball|cricket|tennis|athlet|league|tournament|olympic/, 'a worn leather grip and polished steel under floodlight, scuffed from use'],
+  [/histor|archaeolog|ancient|medieval|excavat|artefact|artifact|ruins|antiquit/, 'a fragment of weathered carved stone half-lifted from packed earth, a soft brush resting against it'],
+  [/geograph|\bmap\b|border|territory|glacier|\briver\b|coastline|terrain/, 'contoured layers of cut slate stacked into a relief, a thin channel of water running through the lowest layer'],
+  [/election|\bvote|ballot|campaign trail|parliament|senate|congress/, 'a sealed steel ballot drum on a plain table, the slot cut into its top catching hard light'],
+  [/regulat|legislat|\blaw\b|court|ruling|lawsuit|compliance|antitrust|sanction/, 'a pair of heavy brass scale pans on a marble surface, one pan weighed down by a solid steel block'],
+  [/protein|genome|biotech|medical|clinical|\bdrug\b|vaccine/, 'a rack of sealed glass vials in a steel cradle, one lit from below through pale liquid'],
+  [/satellite|spacecraft|\borbit|telescope|\bnasa\b|\blunar\b|\bmars\b/, 'a gold-foiled instrument panel angled against deep black, a lens element catching a hard rim of light'],
+  [/climate|emission|wildfire|drought|flood|ecosystem|biodiversity|coral|glacier/, 'a cracked bed of dried mud under hard low light, a shallow film of water pooling in the deepest fissure'],
+  [/robot|drone|autonomous vehicle|self-driving/, 'a precision articulated joint of steel and cable mid-motion, the hydraulic line taut'],
+  [/funding round|acquisition|valuation|\bipo\b|revenue|market share/, 'interlocking brass gears of very different sizes meshed on a dark workbench, one turning against the others'],
+
+  // Tier 3 — general technology vocabulary. Last, because these words are the ones most
+  // likely to appear incidentally in a story that is really about something else.
+  [/training (data|run|set)|dataset|corpus|benchmark|\beval\b/, 'clear liquid pouring between two glass vessels through a fine steel mesh, sediment collecting in the mesh'],
+  [/\bdns\b|routing|bandwidth|network traffic|packet/, 'a junction of hundreds of coloured fibre strands fanning out of a single steel collar'],
+  [/\bai\b|\bllm\b|model|algorithm|software|browser|platform/, 'nested panes of clear glass at slight angles, light refracting through the stack onto a dark surface'],
+  [/energy|power grid|electricity|reactor/, 'thick copper busbars rising out of a cooling bath, steam curling off the surface'],
+];
+
+/** Last resort when nothing matched — still concrete, still cleanly renderable. */
+const DEFAULT_CONCEPT =
+  'a precision steel mechanism partly disassembled on a dark surface, one component lifted clear and catching the light';
 
 /**
- * A short subject anchor taken from the story itself.
+ * The visual subject for this post, derived from what the story is about.
  *
- * The model's brief is the main driver, but briefs drift generic — and a generic brief
- * produces artwork that could sit above any post, which is worse than no artwork. Appending
- * the story's own significant nouns and its editorial tag keeps the generator pulled toward
- * this specific subject even when the brief is vague.
+ * The writer's own brief is still the main driver — it knows the specifics. This runs
+ * alongside it as the anchor, because briefs drift abstract under pressure and an abstract
+ * brief produces artwork that could sit above any post, which is worse than no artwork.
  */
 function subjectAnchor(candidate, verdict) {
-  const words = String(candidate.title)
-    .toLowerCase()
-    .replace(/[^a-z0-9\s]/g, ' ')
-    .split(/\s+/)
-    .filter((w) => w.length > 3 && !ANCHOR_STOPWORDS.has(w))
-    .slice(0, 6);
-
-  const tag = verdict.tag ? verdict.tag.toLowerCase() : '';
-  return [tag, ...words].filter(Boolean).join(' ');
-}
-
-/**
- * Fallback brief for when the model returned no usable imagePrompt. Built from the story's
- * own subject rather than from the beat, so it still illustrates this post specifically.
- */
-function fallbackImagePrompt(candidate, verdict) {
-  return `a scene representing ${subjectAnchor(candidate, verdict)}, physical objects and systems shown clearly, dramatic side lighting`;
+  const haystack = `${verdict.tag || ''} ${candidate.title} ${candidate.summary}`.toLowerCase();
+  const hit = VISUAL_CONCEPTS.find(([pattern]) => pattern.test(haystack));
+  return hit ? hit[1] : DEFAULT_CONCEPT;
 }
 
 /**
  * Attach artwork to a post. Never throws: a post without an image is still a good post,
  * and artwork must not be able to fail a cycle that already did the expensive work.
  */
+/**
+ * The full prompt sent to the generator.
+ *
+ * Anchor first: the generator weights the opening of a prompt most heavily, and the anchor
+ * is the part guaranteed to be both on-subject and free of the nouns that render as fake
+ * lettering. The writer's brief follows as the story-specific detail — when it is present
+ * and concrete it sharpens the scene, and when it has drifted abstract the anchor has
+ * already established what is being depicted.
+ *
+ * Exported so the concept matching can be tested without generating an image.
+ */
+export function buildImageBrief(candidate, verdict, draft = {}) {
+  const anchor = subjectAnchor(candidate, verdict);
+  const brief = stripNegations(draft.imagePrompt || '');
+  return [anchor, brief, IMAGE_STYLE].filter(Boolean).join('. ');
+}
+
 export async function attachImage(candidate, verdict, persona, draft) {
   if (!IMAGES_ENABLED) return { imageUrl: null, imagePrompt: null };
 
-  const brief = stripNegations(draft.imagePrompt || '') || fallbackImagePrompt(candidate, verdict);
-  // Subject anchor first: the generator weights the opening of a prompt most heavily, so
-  // leading with what the story is about is what keeps the artwork tied to this post.
-  const full = `${subjectAnchor(candidate, verdict)}. ${brief}. ${IMAGE_STYLE}`;
+  const full = buildImageBrief(candidate, verdict, draft);
 
   try {
     // Seed from the story key so the same post always resolves to the same artwork.
@@ -495,15 +641,37 @@ export async function runCycle(agentId, { trigger = 'cron' } = {}) {
     throw firstJudgeError;
   }
 
+  // Partition first and write the rejections afterwards, so the rescue path below can
+  // still promote a candidate that would otherwise have been filed as rejected.
   const approved = [];
-  let rejectedCount = 0;
+  const declined = [];
 
   for (const { candidate, verdict } of verdicts) {
     if (!verdict) continue; // judging errored; leave it unseen so it can resurface
-    if (verdict.decision === 'publish') {
-      approved.push({ candidate, verdict });
-      continue;
+    (verdict.decision === 'publish' ? approved : declined).push({ candidate, verdict });
+  }
+
+  // Nothing cleared the bar. Rather than filing another empty cycle, run the best
+  // candidate that is at least on-beat and not hollow. It is marked as a rescue in the
+  // log and its real score is stored, so a thin post is never presented as a strong one.
+  if (!approved.length && !ALLOW_EMPTY_CYCLE && declined.length) {
+    const best = pickRescue(declined);
+
+    if (best) {
+      const i = declined.indexOf(best);
+      declined.splice(i, 1);
+      best.verdict = { ...best.verdict, rescued: true, ...rescueNarrative(best) };
+      approved.push(best);
+      console.log(
+        `[cycle:${trigger}] nothing cleared ${SCORE_THRESHOLD}; running best available ` +
+          `"${best.candidate.title.slice(0, 50)}" (score ${best.verdict.overall})`
+      );
+    } else {
+      console.log(`[cycle:${trigger}] no candidate was on-beat enough to rescue`);
     }
+  }
+
+  for (const { candidate, verdict } of declined) {
     insertRejection({
       agentId,
       topic: candidate.title,
@@ -514,8 +682,8 @@ export async function runCycle(agentId, { trigger = 'cron' } = {}) {
       url: candidate.url,
       score: verdict.overall,
     });
-    rejectedCount++;
   }
+  const rejectedCount = declined.length;
 
   // Best-scoring approvals run now; the rest are neither published nor rejected, so they
   // stay eligible and can resurface next cycle rather than being silently discarded.

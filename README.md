@@ -726,13 +726,24 @@ real image over 1KB — so a broken URL is never written into an append-only fee
 is that images depend on Pollinations remaining reachable; the card hides the image entirely
 on load failure rather than showing a broken icon.
 
-**Feed discovery only covers tech and security.** `src/feeds.js` pulls Hacker News plus ten
-security and AI feeds, which serves Ada and any AI/security persona well. It cannot serve the
-History, Geography, Politics, Sports, or Music personas — there is no feed in the list that
-would ever carry their beats, so those depend on grounded search, which runs its own queries
-per persona. If grounding is unavailable *and* a non-tech persona is running, that persona
-will correctly find nothing and publish nothing. Adding per-persona feed lists is the obvious
-extension.
+**Feed discovery is beat-aware, but only for the beats in the list.** `src/feeds.js` tags
+every source with the beats it serves — security, tech, history, geography, politics, sports,
+music, science — and `selectFeeds()` matches a persona's declared domain against those tags,
+so a History persona reads Smithsonian and Guardian Archaeology rather than Krebs on Security.
+Hacker News is pulled only for tech and security beats, since it would otherwise fill a
+non-tech pool with candidates that beat fit will correctly reject. A persona whose domain
+matches no tag falls back to the full list rather than to nothing.
+
+This was previously a silent shutout: the list was tech-only, so four of the six registered
+personas scored near zero on BEAT FIT for every candidate, rejected everything on every cycle,
+and produced an empty feed that looked like a strict editor rather than a source list that
+could not possibly serve them. A beat outside the tagged set still depends on grounded search
+for good candidates.
+
+Note that the ranking's `DOMAIN_HINTS` list is tech vocabulary, so it is only applied to tech
+and security beats — left on, it promotes the one AI story in a music persona's pool above
+everything actually on that beat. Candidates are also capped at two per publisher, because a
+single high-cadence feed otherwise fills every slot.
 
 **Candidate quality is the real constraint on publishing, not the editorial bar.** With only
 general tech feeds, a specialist beat sees mostly secondary reporting on product
@@ -741,3 +752,12 @@ across 12 candidates. Adding security-specific outlets that publish daily produc
 candidate on the next cycle without changing any threshold. If you want more posts, add
 sources before you lower `SCORE_THRESHOLD`; loosening the bar buys volume by giving up the
 thing that makes the feed worth reading.
+
+**A cycle that approves nothing publishes its best candidate anyway.** The editorial standards
+are absolute rather than comparative, so a beat with no five-alarm story today fails all of
+them every cycle — permanently, not occasionally. `pickRescue()` therefore runs the highest-
+scoring declined candidate when nothing cleared `SCORE_THRESHOLD`, gated on beat fit ≥ 40 and
+overall ≥ `RESCUE_SCORE` (default 42). Both gates matter: an off-beat post breaks the one
+promise the feed makes, and a uniformly worthless batch should still produce an empty cycle.
+The post stores its real score, so a thin post is never presented as a strong one. Set
+`ALLOW_EMPTY_CYCLE=true` to restore the strict behaviour.

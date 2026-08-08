@@ -475,20 +475,58 @@ a { color: var(--accent); }
 
 /* ---------------------------------- feed ---------------------------------- */
 
-.feed { display: flex; flex-direction: column; gap: 15px; }
+.feed { display: flex; flex-direction: column; gap: 22px; }
 
-.post-card { overflow: hidden; transition: border-color .18s, box-shadow .18s; }
-.post-card:hover { box-shadow: var(--shadow); border-color: var(--border); }
+.post-card { overflow: hidden; transition: border-color .18s, box-shadow .18s, transform .18s; }
+.post-card:hover { box-shadow: var(--shadow-lg); border-color: var(--accent-line); transform: translateY(-2px); }
 
-.post-image { position: relative; aspect-ratio: 16 / 9; background: var(--surface-2); overflow: hidden; }
-.post-image img { width: 100%; height: 100%; object-fit: cover; display: block; opacity: 0; transition: opacity .5s ease; }
-.post-image-loaded img { opacity: 1; }
+/* -------------------------------- byline --------------------------------- */
+
+.post-byline {
+  display: flex; align-items: center; gap: 11px;
+  padding: 15px 19px 13px;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.post-avatar {
+  flex-shrink: 0;
+  width: 38px; height: 38px; border-radius: 50%;
+  display: grid; place-items: center;
+  font: 700 13.5px/1 var(--font-display); letter-spacing: .02em;
+  color: #fff;
+  background: linear-gradient(135deg, var(--accent), var(--accent-strong));
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+.post-byline-text { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.post-author { font: 600 14.5px/1.2 var(--font-display); letter-spacing: -.01em; color: var(--text); }
+.post-author-meta {
+  display: flex; align-items: center; gap: 5px; flex-wrap: wrap;
+  font-size: 12px; color: var(--text-faint);
+}
+.post-author-role { color: var(--text-dim); }
+.dot-sep { color: var(--text-faint); opacity: .6; }
+
+.post-byline-chip { margin-left: auto; flex-shrink: 0; }
+
+.post-image {
+  position: relative; margin: 0;
+  aspect-ratio: 16 / 9; background: var(--surface-2); overflow: hidden;
+}
+.post-image img {
+  width: 100%; height: 100%; display: block;
+  object-fit: cover;
+  /* Generation runs taller than this box; cropping from the top discards the strip of
+     pseudo-text the generator tends to leave along the bottom edge. */
+  object-position: center top;
+  opacity: 0; transform: scale(1.02);
+  transition: opacity .5s ease, transform .6s ease;
+}
+.post-image-loaded img { opacity: 1; transform: none; }
 .post-image-skeleton { position: absolute; inset: 0; background: linear-gradient(90deg, var(--surface-2), var(--surface-hover), var(--surface-2)); background-size: 200% 100%; animation: shimmer 1.4s infinite; }
 
-.post-body { padding: 17px 19px 15px; }
-
-.post-meta { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 11px; }
-.post-meta time { font-size: 12px; color: var(--text-faint); margin-left: auto; }
+.post-body { padding: 16px 19px 4px; }
+.post-body-lower { padding: 16px 19px 15px; }
 
 .chip {
   font-size: 11px; font-weight: 600; letter-spacing: .03em;
@@ -496,21 +534,36 @@ a { color: var(--accent); }
   background: var(--accent-soft); color: var(--accent);
   border: 1px solid var(--accent-line);
 }
-.chip-format { background: var(--surface-2); color: var(--text-dim); border-color: var(--border); }
 
-/* The takeaway is the one-line thesis; it leads the card and carries the accent. */
-.post-takeaway {
-  margin: 0 0 11px;
-  padding-left: 13px;
-  border-left: 3px solid var(--accent);
-  font: 600 16.5px/1.45 var(--font-display);
-  letter-spacing: -.01em;
+/* The headline is the story; it is the largest thing on the card by a clear margin. */
+.post-headline {
+  margin: 0 0 9px;
+  font: 700 22px/1.28 var(--font-display);
+  letter-spacing: -.022em;
   color: var(--text);
+  text-wrap: balance;
 }
 
-.post-text { margin: 0 0 14px; color: var(--text); font-size: 15px; line-height: 1.68; }
+/* The takeaway is the one-line thesis, set as a deck beneath the headline. */
+.post-deck {
+  margin: 0 0 4px;
+  font: 400 16px/1.5 var(--font-body);
+  color: var(--text-dim);
+  text-wrap: pretty;
+}
 
-.sources { display: flex; flex-wrap: wrap; gap: 7px; margin-bottom: 12px; }
+.post-text { margin: 0 0 15px; color: var(--text); font-size: 15.5px; line-height: 1.72; text-wrap: pretty; }
+.post-text:last-of-type { margin-bottom: 4px; }
+
+.post-footer { margin-top: 16px; padding-top: 13px; border-top: 1px solid var(--border-soft); }
+.post-footer-row { display: flex; align-items: center; gap: 10px; }
+.post-format-mark {
+  margin-left: auto;
+  font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase;
+  color: var(--text-faint);
+}
+
+.sources { display: flex; flex-wrap: wrap; gap: 7px; margin-bottom: 11px; }
 .source-link {
   display: inline-flex; align-items: center; gap: 6px;
   font-size: 12px; text-decoration: none;
@@ -522,6 +575,7 @@ a { color: var(--accent); }
 }
 .source-link:hover { color: var(--accent); border-color: var(--accent-line); background: var(--accent-soft); }
 .source-dot { width: 5px; height: 5px; border-radius: 50%; background: var(--accent); flex-shrink: 0; }
+.source-arrow { font-size: 10px; opacity: .55; }
 
 .disclosure {
   display: inline-flex; align-items: center; gap: 7px;
@@ -773,6 +827,16 @@ a { color: var(--accent); }
   .persona-mono { width: 48px; height: 48px; border-radius: 14px; font-size: 18px; }
   .shell { padding: 18px 14px 60px; }
   .tab-btn { font-size: 12.5px; padding: 8px 8px; }
+
+  .post-headline { font-size: 19px; }
+  .post-deck { font-size: 15px; }
+  .post-text { font-size: 15px; }
+  .post-byline { padding: 13px 15px 11px; }
+  .post-body { padding: 14px 15px 4px; }
+  .post-body-lower { padding: 14px 15px 14px; }
+  .post-avatar { width: 34px; height: 34px; font-size: 12.5px; }
+  /* The tag would otherwise push the byline into a second line on a narrow screen. */
+  .post-byline-chip { display: none; }
 }
 
 /* Respect a reduced-motion preference: keep state changes, drop the movement. */
