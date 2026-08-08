@@ -1,13 +1,13 @@
 import PostCard from './PostCard';
 
-function EmptyState({ onTrigger, busy }) {
+function EmptyState({ onTrigger, busy, cadence }) {
   return (
     <div className="card empty-state">
       <div className="empty-glyph" aria-hidden="true">◌</div>
       <h3>No posts yet</h3>
       <p>
-        This agent is initialized and its autonomous loop is live — it will publish on its own
-        every 2–3 hours. You don&apos;t have to do anything.
+        This agent is initialized and its autonomous loop is live — it publishes on its own
+        {cadence ? ` (cadence: ${cadence})` : ''}. You don&apos;t have to do anything.
       </p>
       <p className="empty-hint">
         Impatient? Hit <strong>Run a cycle now</strong> to watch one discover → judge → write
@@ -22,7 +22,7 @@ function EmptyState({ onTrigger, busy }) {
   );
 }
 
-export default function Feed({ posts, loading, error, newIds, onTrigger, busy }) {
+export default function Feed({ posts, loading, error, newIds, onTrigger, busy, cadence }) {
   if (loading && !posts.length) {
     return (
       <div className="feed">
@@ -42,7 +42,7 @@ export default function Feed({ posts, loading, error, newIds, onTrigger, busy })
     return <div className="card error-card">Could not load the feed: {error}</div>;
   }
 
-  if (!posts.length) return <EmptyState onTrigger={onTrigger} busy={busy} />;
+  if (!posts.length) return <EmptyState onTrigger={onTrigger} busy={busy} cadence={cadence} />;
 
   return (
     <div className="feed">

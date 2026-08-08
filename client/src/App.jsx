@@ -1,21 +1,40 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import * as api from './api';
+import TopBar from './components/TopBar';
 import Header from './components/Header';
 import Feed from './components/Feed';
 import StatusPanel from './components/StatusPanel';
 import RejectionsPanel from './components/RejectionsPanel';
-import AgentSwitcher from './components/AgentSwitcher';
+import PersonaPanel from './components/PersonaPanel';
 import InitForm from './components/InitForm';
 
 const POLL_MS = 30_000;
 
 const STAGES = [
-  'Scanning headlines…',
-  'Deduplicating stories across sources…',
-  'Evaluating candidates against editorial standards…',
-  'Weighing freshness…',
+  'Searching for candidate stories…',
+  'Verifying sources…',
+  'Judging each candidate against editorial standards…',
+  'Checking against what it already published…',
   'Writing…',
 ];
+
+/** Quota and configuration failures persist until resolved; they are not toast material. */
+const STICKY_ERROR = /quota|rate limit|api key|not available|billing/i;
+
+function useTheme() {
+  const [theme, setTheme] = useState(() => {
+    const saved = localStorage.getItem('pa-theme');
+    if (saved === 'light' || saved === 'dark') return saved;
+    return window.matchMedia?.('(prefers-color-scheme: light)').matches ? 'light' : 'dark';
+  });
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    localStorage.setItem('pa-theme', theme);
+  }, [theme]);
+
+  return [theme, () => setTheme((t) => (t === 'dark' ? 'light' : 'dark'))];
+}
 
 export default function App() {
   const [agents, setAgents] = useState([]);
@@ -23,12 +42,25 @@ export default function App() {
   const [posts, setPosts] = useState([]);
   const [status, setStatus] = useState(null);
   const [rejections, setRejections] = useState([]);
+  const [rejectionMeta, setRejectionMeta] = useState({ evaluated: 0, acceptanceRate: 0 });
+  const [persona, setPersona] = useState(null);
+  const [tab, setTab] = useState('posts');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [banner, setBanner] = useState(null);
   const [showInit, setShowInit] = useState(false);
   const [busy, setBusy] = useState(false);
   const [stage, setStage] = useState(null);
   const [toast, setToast] = useState(null);
+  const [theme, toggleTheme] = useTheme();
+
+  // Drives the live countdown without re-fetching. One state bump a second is cheap and
+  // makes the autonomy visible instead of merely stated.
+  const [tick, setTick] = useState(0);
+  useEffect(() => {
+    const id = setInterval(() => setTick((t) => t + 1), 1000);
+    return () => clearInterval(id);
+  }, []);
 
   // Ids already seen, so only genuinely new cards animate in.
   const seenIds = useRef(new Set());
@@ -55,13 +87,14 @@ export default function App() {
       const fresh = feed.posts.filter((p) => !seenIds.current.has(p.id)).map((p) => p.id);
       if (fresh.length && seenIds.current.size) {
         setNewIds(new Set(fresh));
-        setTimeout(() => setNewIds(new Set()), 1200);
+        setTimeout(() => setNewIds(new Set()), 1400);
       }
       feed.posts.forEach((p) => seenIds.current.add(p.id));
 
       setPosts(feed.posts);
       setStatus(st);
       setRejections(rej.rejections);
+      setRejectionMeta({ evaluated: rej.evaluated, acceptanceRate: rej.acceptanceRate });
       setError(null);
     } catch (err) {
       setError(err.message);
@@ -69,6 +102,17 @@ export default function App() {
       setLoading(false);
     }
   }, []);
+
+  // The persona config changes only when the agent does, so it is fetched separately from
+  // the 30s poll rather than re-requested every tick.
+  useEffect(() => {
+    if (!activeId) return;
+    setPersona(null);
+    api
+      .getPersona(activeId)
+      .then(({ persona }) => setPersona(persona))
+      .catch(() => setPersona(null));
+  }, [activeId]);
 
   // Boot: load agents, select the first one.
   useEffect(() => {
@@ -94,10 +138,11 @@ export default function App() {
     setPosts([]);
     setStatus(null);
     setRejections([]);
+    setTab('posts');
     loadAgentData(activeId);
   }, [activeId, loadAgentData]);
 
-  // Poll every 30s so autonomously published posts appear without a refresh.
+  // Poll so autonomously published posts appear without a refresh.
   useEffect(() => {
     if (!activeId) return undefined;
     const id = setInterval(() => loadAgentData(activeId, { silent: true }), POLL_MS);
@@ -118,50 +163,81 @@ export default function App() {
   async function handleTrigger() {
     if (!activeId || busy) return;
     setBusy(true);
+    setBanner(null);
     let i = 0;
     setStage(STAGES[0]);
     const ticker = setInterval(() => {
       i = Math.min(i + 1, STAGES.length - 1);
       setStage(STAGES[i]);
-    }, 6000);
+    }, 7000);
 
     try {
       const result = await api.triggerCycle(activeId);
       await loadAgentData(activeId, { silent: true });
       await loadAgents();
-      // `published` is an array — a cycle may publish zero, one, or several posts.
-      const posts = result.published || [];
+      const published = result.published || [];
       setToast(
-        posts.length === 1
-          ? `Published: ${posts[0].title}`
-          : posts.length > 1
-            ? `Published ${posts.length} posts.`
+        published.length === 1
+          ? `Published: ${published[0].title}`
+          : published.length > 1
+            ? `Published ${published.length} posts.`
             : `Cycle complete — nothing cleared the bar (${result.rejected} rejected).`
       );
+      // Nothing published is a normal editorial outcome; point at the evidence for it.
+      if (!published.length && result.rejected > 0) setTab('rejected');
+      setTimeout(() => setToast(null), 6000);
     } catch (err) {
-      // Free-tier quota exhaustion is an expected condition, not a crash — say so plainly.
-      setToast(err.message);
+      // A quota wall is a standing condition, not a momentary blip — it must not disappear
+      // after six seconds while the user is still looking for the cause.
+      if (STICKY_ERROR.test(err.message)) setBanner(err.message);
+      else {
+        setToast(err.message);
+        setTimeout(() => setToast(null), 6000);
+      }
     } finally {
       clearInterval(ticker);
       setStage(null);
       setBusy(false);
-      setTimeout(() => setToast(null), 6000);
     }
   }
 
   const activeAgent = agents.find((a) => a.agentId === activeId);
+  const accent = useMemo(
+    () => api.personaAccent(activeAgent?.domain || status?.persona?.domain),
+    [activeAgent, status]
+  );
+
+  const TABS = [
+    ['posts', 'Posts', posts.length],
+    ['rejected', 'Rejected', rejections.length],
+    ['persona', 'Persona', null],
+  ];
 
   /* --------------------------------- render -------------------------------- */
 
   return (
-    <div className="app">
+    <div className="app" data-accent={accent}>
+      <TopBar
+        agents={agents}
+        activeId={activeId}
+        onSelect={setActiveId}
+        onNew={() => setShowInit(true)}
+        theme={theme}
+        onToggleTheme={toggleTheme}
+      />
+
       <div className="shell">
-        <AgentSwitcher
-          agents={agents}
-          activeId={activeId}
-          onSelect={setActiveId}
-          onNew={() => setShowInit(true)}
-        />
+        {banner && (
+          <div className="banner" role="status">
+            <span className="banner-icon" aria-hidden="true">
+              !
+            </span>
+            <p>{banner}</p>
+            <button className="banner-close" onClick={() => setBanner(null)} aria-label="Dismiss">
+              ✕
+            </button>
+          </div>
+        )}
 
         {(showInit || !agents.length) && (
           <InitForm
@@ -174,36 +250,70 @@ export default function App() {
 
         {activeId && (
           <>
-            <Header agent={activeAgent || status?.persona} status={status} />
+            <Header agent={activeAgent || status?.persona} status={status} tick={tick} />
 
             <div className="action-row">
               <button className="btn btn-primary" onClick={handleTrigger} disabled={busy}>
-                {busy ? <span className="spinner" /> : '▶'} {busy ? 'Running…' : 'Run a cycle now'}
+                {busy ? <span className="spinner" /> : <span aria-hidden="true">▶</span>}
+                {busy ? 'Running…' : 'Run a cycle now'}
               </button>
               {stage && <span className="stage">{stage}</span>}
+              {!stage && (
+                <span className="action-note muted small">
+                  Optional — it publishes on its own schedule regardless.
+                </span>
+              )}
             </div>
 
             <div className="layout">
               <main className="col-main">
-                <Feed
-                  posts={posts}
-                  loading={loading}
-                  error={error}
-                  newIds={newIds}
-                  onTrigger={handleTrigger}
-                  busy={busy}
-                />
+                <nav className="tabs" role="tablist" aria-label="Agent views">
+                  {TABS.map(([key, label, count]) => (
+                    <button
+                      key={key}
+                      role="tab"
+                      aria-selected={tab === key}
+                      className={`tab-btn${tab === key ? ' tab-btn-active' : ''}`}
+                      onClick={() => setTab(key)}
+                    >
+                      {label}
+                      {count !== null && <span className="tab-btn-count">{count}</span>}
+                    </button>
+                  ))}
+                </nav>
+
+                <div role="tabpanel">
+                  {tab === 'posts' && (
+                    <Feed
+                      posts={posts}
+                      loading={loading}
+                      error={error}
+                      newIds={newIds}
+                      onTrigger={handleTrigger}
+                      busy={busy}
+                      cadence={status?.cycleCadence}
+                    />
+                  )}
+                  {tab === 'rejected' && (
+                    <RejectionsPanel
+                      rejections={rejections}
+                      evaluated={rejectionMeta.evaluated}
+                      acceptanceRate={rejectionMeta.acceptanceRate}
+                    />
+                  )}
+                  {tab === 'persona' && <PersonaPanel persona={persona} />}
+                </div>
               </main>
+
               <aside className="col-side">
-                <StatusPanel status={status} />
-                <RejectionsPanel rejections={rejections} />
+                <StatusPanel status={status} tick={tick} />
               </aside>
             </div>
           </>
         )}
 
         <footer className="site-foot">
-          Autonomous persona agent · discovers, judges, and publishes on its own schedule
+          Autonomous persona agents · discover, judge, and publish on their own schedule
         </footer>
       </div>
 

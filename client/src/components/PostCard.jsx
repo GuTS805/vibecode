@@ -51,6 +51,10 @@ export default function PostCard({ post, isNew }) {
   const [open, setOpen] = useState(false);
   const formatLabel = post.format ? FORMAT_LABELS[post.format] || null : null;
 
+  // The rationale ends with the source list, which is already rendered as links below.
+  // Splitting it off keeps the editorial reasoning readable instead of trailing into URLs.
+  const [reasoning, sourceTail] = splitRationale(post.rationale);
+
   return (
     <article className={`card post-card${isNew ? ' card-enter' : ''}`}>
       {post.imageUrl && (
@@ -73,27 +77,40 @@ export default function PostCard({ post, isNew }) {
 
         <p className="post-text">{post.text}</p>
 
-        <button className="disclosure" onClick={() => setOpen((v) => !v)} aria-expanded={open}>
-          <span className={`caret${open ? ' caret-open' : ''}`}>▸</span>
-          Why this topic?
-        </button>
-
-        <div className={`collapsible${open ? ' collapsible-open' : ''}`}>
-          <div className="collapsible-inner">
-            <p className="rationale">{post.rationale}</p>
-          </div>
-        </div>
-
         {post.sources?.length > 0 && (
           <div className="sources">
             {post.sources.map((s) => (
               <a key={s} href={s} target="_blank" rel="noopener noreferrer" className="source-link">
-                ↗ {hostOf(s)}
+                <span className="source-dot" aria-hidden="true" />
+                {hostOf(s)}
               </a>
             ))}
           </div>
         )}
+
+        {/* The editorial reasoning is the part that distinguishes this from a scraper, so
+            it gets a labelled affordance rather than a bare caret. */}
+        <button className="disclosure" onClick={() => setOpen((v) => !v)} aria-expanded={open}>
+          <span className={`caret${open ? ' caret-open' : ''}`} aria-hidden="true">
+            ▸
+          </span>
+          {open ? 'Hide editorial reasoning' : 'Why this topic?'}
+        </button>
+
+        <div className={`collapsible${open ? ' collapsible-open' : ''}`}>
+          <div className="collapsible-inner">
+            <p className="rationale">{reasoning}</p>
+            {sourceTail && <p className="rationale-sources">{sourceTail}</p>}
+          </div>
+        </div>
       </div>
     </article>
   );
+}
+
+/** Separates the analytical sentences from the trailing "Sources: …" list. */
+function splitRationale(rationale = '') {
+  const i = rationale.search(/\bSources?:/i);
+  if (i === -1) return [rationale, null];
+  return [rationale.slice(0, i).trim(), rationale.slice(i).trim()];
 }
