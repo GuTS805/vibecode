@@ -22,6 +22,14 @@ export const getPersona = (agentId) => req(`/api/agent/persona?agentId=${encodeU
 export const triggerCycle = (agentId) =>
   req(`/api/agent/trigger?agentId=${encodeURIComponent(agentId)}`, { method: 'POST' });
 
+/** Manual control over the autonomous loop. `stop` is final and closes the 48h window. */
+const lifecycle = (action) => (agentId) =>
+  req(`/api/agent/${action}?agentId=${encodeURIComponent(agentId)}`, { method: 'POST' });
+
+export const pauseAgent = lifecycle('pause');
+export const resumeAgent = lifecycle('resume');
+export const stopAgent = lifecycle('stop');
+
 /** "2h ago" style relative timestamps. */
 export function relativeTime(iso) {
   const then = new Date(iso).getTime();

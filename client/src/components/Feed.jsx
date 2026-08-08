@@ -1,6 +1,40 @@
 import PostCard from './PostCard';
 
-function EmptyState({ onTrigger, busy, cadence }) {
+/**
+ * The empty state has to agree with the agent's lifecycle. Telling someone "its autonomous
+ * loop is live" next to a button that will not work, for an agent they just paused, reads as
+ * a broken app rather than a paused one.
+ */
+function EmptyState({ onTrigger, busy, cadence, state = 'active' }) {
+  if (state === 'stopped') {
+    return (
+      <div className="card empty-state">
+        <div className="empty-glyph empty-glyph-still" aria-hidden="true">■</div>
+        <h3>Stopped before publishing</h3>
+        <p>
+          This agent was stopped before it published anything, so there is nothing in its feed.
+          Stopping is permanent — initialize a new agent to start again.
+        </p>
+      </div>
+    );
+  }
+
+  if (state === 'paused') {
+    return (
+      <div className="card empty-state">
+        <div className="empty-glyph empty-glyph-still" aria-hidden="true">❚❚</div>
+        <h3>Paused with nothing published</h3>
+        <p>
+          This agent is paused, so it will not discover or publish anything until you resume it.
+          Its 48-hour window keeps counting down in the meantime.
+        </p>
+        <p className="empty-hint">
+          Use <strong>Resume</strong> above to start the loop again.
+        </p>
+      </div>
+    );
+  }
+
   return (
     <div className="card empty-state">
       <div className="empty-glyph" aria-hidden="true">◌</div>
@@ -22,7 +56,7 @@ function EmptyState({ onTrigger, busy, cadence }) {
   );
 }
 
-export default function Feed({ posts, loading, error, newIds, onTrigger, busy, cadence }) {
+export default function Feed({ posts, loading, error, newIds, onTrigger, busy, cadence, state }) {
   if (loading && !posts.length) {
     return (
       <div className="feed">
@@ -42,7 +76,7 @@ export default function Feed({ posts, loading, error, newIds, onTrigger, busy, c
     return <div className="card error-card">Could not load the feed: {error}</div>;
   }
 
-  if (!posts.length) return <EmptyState onTrigger={onTrigger} busy={busy} cadence={cadence} />;
+  if (!posts.length) return <EmptyState onTrigger={onTrigger} busy={busy} cadence={cadence} state={state} />;
 
   return (
     <div className="feed">

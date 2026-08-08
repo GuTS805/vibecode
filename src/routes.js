@@ -1,10 +1,10 @@
 import { Router } from 'express';
 import {
-  createAgent, getAgent, listAgents, getPosts, getRejections, countStats, loadPersona,
+  createAgent, getAgent, listAgents, getPosts, getRejections, countStats, loadPersona, agentState,
 } from './db.js';
 import { resolvePersona, personaSystemPrompt, listRegistryPersonas } from './persona.js';
 import {
-  primeFirstCycle, runCycleGuarded, schedulerInfo, AUTONOMY_HOURS, isRunning,
+  primeFirstCycle, runCycleGuarded, schedulerInfo, AUTONOMY_HOURS, isRunning, setLifecycle,
 } from './scheduler.js';
 import { getActiveModel, getTextProvider } from './llm.js';
 
@@ -93,6 +93,9 @@ router.get('/agent/status', (req, res) => {
     autonomyExpiresAt: sched.autonomyExpiresAt,
     autonomyActive: sched.autonomyActive,
     cycleRunningNow: sched.isRunningNow,
+    // Manual lifecycle: 'active' | 'paused' | 'stopped'.
+    state: sched.state,
+    stateChangedAt: sched.stateChangedAt,
     model: getActiveModel(),
     textProvider: getTextProvider(),
     imageProvider: process.env.POST_IMAGES === 'false' ? 'disabled' : 'pollinations',
@@ -147,6 +150,22 @@ router.get('/debug/rejected', rejectionsHandler);
 router.post('/agent/trigger', async (req, res) => {
   const agent = requireAgent(req, res);
   if (!agent) return;
+
+  // Pausing has to mean the agent publishes nothing. Letting a manual trigger through would
+  // make "paused" mean "paused unless you press the button", which is not what an off switch
+  // is for.
+  const state = agentState(agent);
+  if (state !== 'active') {
+    return res.status(409).json({
+      error:
+        state === 'stopped'
+          ? `${agent.name} has been stopped and will not run cycles.`
+          : `${agent.name} is paused. Resume it before running a cycle.`,
+      code: state === 'stopped' ? 'AGENT_STOPPED' : 'AGENT_PAUSED',
+      state,
+    });
+  }
+
   if (isRunning(agent.id)) {
     return res.status(409).json({ error: 'A cycle is already running for this agent' });
   }
@@ -174,6 +193,54 @@ router.post('/agent/trigger', async (req, res) => {
   }
 });
 
+/* --------------------- POST /pause, /resume, /stop -------------------------- */
+
+/**
+ * Manual control over the autonomous loop.
+ *
+ * An agent that runs unattended for 48 hours needs an off switch, and the trigger endpoint is
+ * not one — it starts work rather than stopping it. These are the only way to make a running
+ * persona stop publishing without killing the process or waiting out its window.
+ *
+ *   pause   reversible; the 48h window keeps elapsing while it idles
+ *   resume  restarts the loop, rescheduling from now if the due time has passed
+ *   stop    final; also closes the autonomy window, so it cannot be resumed
+ */
+function lifecycleHandler(state) {
+  return (req, res) => {
+    const agent = requireAgent(req, res);
+    if (!agent) return;
+
+    const current = agentState(agent);
+    if (current === 'stopped') {
+      return res.status(409).json({
+        error: `${agent.name} has been stopped and cannot be restarted. Initialize a new agent instead.`,
+        code: 'AGENT_STOPPED',
+        state: current,
+      });
+    }
+    if (current === state) {
+      return res.json({ ok: true, agentId: agent.id, state, unchanged: true });
+    }
+
+    const updated = setLifecycle(agent.id, state);
+    res.json({
+      ok: true,
+      agentId: agent.id,
+      name: agent.name,
+      state: agentState(updated),
+      // A cycle already running holds an open request to the provider; aborting it would
+      // spend the quota and store nothing, so it is allowed to finish.
+      cycleStillFinishing: isRunning(agent.id),
+      nextCycleAt: schedulerInfo(agent.id).nextCycleAt,
+    });
+  };
+}
+
+router.post('/agent/pause', lifecycleHandler('paused'));
+router.post('/agent/resume', lifecycleHandler('active'));
+router.post('/agent/stop', lifecycleHandler('stopped'));
+
 /* -------------------------------- GET /agents ------------------------------- */
 
 /** Powers the frontend agent switcher; multiple personas run in parallel. */
@@ -185,6 +252,7 @@ router.get('/agents', (_req, res) => {
       domain: a.domain,
       createdAt: a.created_at,
       posts: countStats(a.id).accepted,
+      state: agentState(a),
     })),
   });
 });

@@ -606,3 +606,46 @@ An intermediate attempt overcorrected into "a deserted room" and produced a lite
 office with the subject absent, so the style contract now specifies a tight close-up where the
 objects fill the frame. Verified across three unrelated story types — export controls, supply
 chain, patch management — rather than on the single example that motivated the fix.
+
+---
+
+## 6 — An off switch for a running agent (2026-08-08)
+
+**Request:** there was no way to manually stop or pause an agent like Ada once it was
+publishing.
+
+A fair gap, and a real one rather than a missing nicety: an agent that publishes unattended for
+48 hours with no way to stop it is a design hole. `/trigger` was the only manual control and it
+starts work rather than stopping it, so the only options were killing the process or waiting
+out the window.
+
+Added `pause`, `resume`, and `stop` as a lifecycle state on the agent row rather than a boolean,
+because "paused" (the operator will decide later) and "stopped" (the operator is done) need to
+be distinguishable — they render differently and only one is reversible. `stop` also closes the
+autonomy window, so it cannot be undone by flipping the state back; the UI confirms before
+calling it.
+
+Three decisions that needed thought rather than defaults:
+
+**A cycle already in flight is not aborted.** It holds an open request to the model provider,
+and killing it would spend the quota and store nothing. It finishes and writes its result. That
+created a visible contradiction in the first version — an amber "paused" pill next to a
+countdown reading "now" — so the transition has its own labels: `pausing` and `finishing`.
+
+**`/trigger` is refused while paused.** Allowing it would make "paused" mean "paused unless you
+press the button", which is not what an off switch is for.
+
+**Resume reschedules from now when the due time has passed.** An agent paused for six hours
+would otherwise fire the instant it resumed, which reads as the pause having been ignored. A due
+time still in the future is left alone so a brief pause does not push the schedule back.
+
+The first UI pass passed 13 of 14 browser checks, and the one failure was the code being more
+truthful than the test: a cycle genuinely was mid-flight, so "now" was correct. Fixing the
+contradiction properly — rather than relaxing the assertion — is what produced the
+`pausing`/`finishing` states.
+
+Two inconsistencies only became visible in a screenshot, not in the assertions: the empty state
+still read "its autonomous loop is live" with an enabled "Run a cycle now" button under a paused
+agent, and the Activity panel ignored the state entirely. Both now reflect it. Verified end to
+end in headless Chrome: 14/14 across active → pause → resume → stop, including the confirmation
+dialog and the disabled-trigger states.

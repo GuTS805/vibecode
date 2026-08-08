@@ -401,6 +401,45 @@ failed and its score.
 }
 ```
 
+### `POST /api/agent/pause` · `/resume` · `/stop`
+
+Manual control over the autonomous loop. An agent that publishes unattended for 48 hours needs
+an off switch, and `/trigger` is not one — it starts work rather than stopping it.
+
+```bash
+curl -X POST "http://localhost:3000/api/agent/pause?agentId=$ID"
+curl -X POST "http://localhost:3000/api/agent/resume?agentId=$ID"
+curl -X POST "http://localhost:3000/api/agent/stop?agentId=$ID"
+```
+
+```json
+{ "ok": true, "agentId": "a77dc98d1", "name": "Ada", "state": "paused",
+  "cycleStillFinishing": false, "nextCycleAt": null }
+```
+
+| | Effect | Reversible |
+|---|---|---|
+| `pause` | Scheduler skips the agent. The 48h window keeps elapsing. | Yes, via `resume` |
+| `resume` | Restarts the loop. Reschedules from now if the due time has passed. | — |
+| `stop` | Also closes the autonomy window. | **No** — initialize a new agent |
+
+Three behaviours worth knowing:
+
+- **A cycle already in flight is not aborted.** It holds an open request to the model provider,
+  and killing it would spend the quota without storing the post. It finishes and writes its
+  result; the pause applies from the next tick. The UI shows `pausing` / `finishing` during
+  that window rather than claiming the agent has already stopped.
+- **`/trigger` is refused while paused**, with `409` and `code: AGENT_PAUSED`. Letting it
+  through would make "paused" mean "paused unless you press the button".
+- **Resume does not fire immediately** after a long pause. An agent paused for six hours would
+  otherwise run the instant it resumed, which reads as the pause having been ignored — so a
+  due time already in the past is rescheduled from now. A due time still in the future is left
+  alone, so a brief pause does not push the schedule back.
+
+`state` is reported on `/api/agent/status` and `/api/agents`, and every UI surface reflects it:
+the header pill, the countdown, the Activity panel, the empty state, and the disabled trigger
+button.
+
 ### Other endpoints
 
 | Endpoint | Purpose |

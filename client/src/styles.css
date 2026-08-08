@@ -362,7 +362,27 @@ a { color: var(--accent); }
 .state-live { color: var(--good); background: var(--good-bg); border-color: color-mix(in srgb, var(--good) 30%, transparent); }
 .state-run  { color: var(--accent); background: var(--accent-soft); border-color: var(--accent-line); }
 .state-off  { color: var(--text-faint); background: var(--surface-2); border-color: var(--border); }
+/* Paused is amber rather than grey: the agent is idle by choice, not finished. Uses the
+   shared warn token so it stays legible in both themes. */
+.state-paused { color: var(--warn); background: var(--warn-bg); border-color: color-mix(in srgb, var(--warn) 30%, transparent); }
+/* Only a genuinely live agent pulses — a paused dot that throbbed would contradict the label. */
 .state-live .state-dot, .state-run .state-dot { animation: pulse 2s ease-in-out infinite; }
+
+.lifecycle-controls {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.btn-danger {
+  background: transparent;
+  border-color: color-mix(in srgb, var(--bad) 40%, transparent);
+  color: var(--bad);
+}
+.btn-danger:hover:not(:disabled) {
+  background: var(--bad-bg);
+  border-color: var(--bad);
+}
 
 @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: .35; } }
 
@@ -763,3 +783,14 @@ a { color: var(--accent); }
     transition-duration: .001ms !important;
   }
 }
+
+/* A paused agent's countdown box should not look live. */
+.next-cycle-paused {
+  background: var(--warn-bg);
+  border-color: color-mix(in srgb, var(--warn) 28%, transparent);
+}
+.next-cycle-paused .next-label,
+.next-cycle-paused .next-value { color: var(--warn); }
+
+/* Lifecycle glyphs sit still; the active empty state's glyph spins. */
+.empty-glyph-still { animation: none !important; }

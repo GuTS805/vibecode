@@ -1,5 +1,5 @@
 import cron from 'node-cron';
-import { listAgents, setNextCycle, touchLastCycle, getAgent, db } from './db.js';
+import { listAgents, setNextCycle, touchLastCycle, getAgent, agentState, setAgentState, db } from './db.js';
 import { runCycle } from './pipeline.js';
 
 const HOUR = 3_600_000;
@@ -148,6 +148,10 @@ export function startScheduler() {
 async function tick() {
   const now = Date.now();
   for (const agent of listAgents()) {
+    // Manual control wins over the schedule. Checked on every tick rather than cached, so
+    // pausing takes effect at the next tick without needing to reach into the scheduler.
+    if (agentState(agent) !== 'active') continue;
+
     const expires = new Date(agent.expires_at).getTime();
     if (now >= expires) continue; // 48h autonomy window elapsed
 
@@ -188,16 +192,48 @@ export function startKeepAlive() {
   return id;
 }
 
+/**
+ * Pause, resume, or stop an agent.
+ *
+ * Resuming reschedules from now when the stored due time has already passed. Without that, an
+ * agent paused for six hours would fire the moment it resumed — which reads as the pause
+ * having been ignored. A due time still in the future is left alone, so a brief pause does
+ * not push the schedule back.
+ *
+ * A cycle already in flight is not aborted: it holds an open request to the model provider,
+ * and killing it would spend the quota without storing the post. It finishes and writes its
+ * result; the pause takes effect from the next tick.
+ */
+export function setLifecycle(agentId, state) {
+  const agent = setAgentState(agentId, state);
+
+  if (state === 'active') {
+    const due = agent.next_cycle_at ? new Date(agent.next_cycle_at).getTime() : 0;
+    if (due <= Date.now()) scheduleNext(agentId);
+  }
+
+  console.log(`[scheduler] agent ${agentId} -> ${state}${running.has(agentId) ? ' (a cycle is mid-flight and will finish)' : ''}`);
+  return getAgent(agentId);
+}
+
 export function schedulerInfo(agentId) {
   const a = getAgent(agentId);
   if (!a) return null;
   const now = Date.now();
   const expires = new Date(a.expires_at).getTime();
+  const state = agentState(a);
+  const windowOpen = now < expires;
+
   return {
-    nextCycleAt: a.next_cycle_at,
+    state,
+    stateChangedAt: a.state_changed_at || null,
+    // Only an active agent inside its window has a meaningful next cycle. Reporting a stale
+    // timestamp for a paused agent would have the UI count down to something that will not
+    // happen.
+    nextCycleAt: state === 'active' && windowOpen ? a.next_cycle_at : null,
     lastCycleAt: a.last_cycle_at,
     autonomyExpiresAt: a.expires_at,
-    autonomyActive: now < expires,
+    autonomyActive: state === 'active' && windowOpen,
     cycleCadence: cadenceDescription(),
     isRunningNow: running.has(a.id),
   };

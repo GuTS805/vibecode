@@ -73,6 +73,11 @@ ensureColumn('rejections', 'url', 'url TEXT');
 ensureColumn('rejections', 'score', 'score INTEGER');
 // Post presentation: generated artwork plus the structure that makes a feed of posts read
 // as varied rather than as one template repeated.
+// Manual lifecycle control. Modelled as a state rather than a boolean so "paused" (the
+// operator will decide later) stays distinguishable from "stopped" (the operator is done),
+// which the UI and the scheduler need to treat differently.
+ensureColumn('agents', 'state', "state TEXT NOT NULL DEFAULT 'active'");
+ensureColumn('agents', 'state_changed_at', 'state_changed_at TEXT');
 ensureColumn('posts', 'image_url', 'image_url TEXT');
 ensureColumn('posts', 'image_prompt', 'image_prompt TEXT');
 ensureColumn('posts', 'takeaway', 'takeaway TEXT');
@@ -115,6 +120,34 @@ export function loadPersona(agent) {
   } catch { /* fall through */ }
   throw new Error(`Agent ${agent.id} has no usable persona config stored.`);
 }
+
+/* ------------------------------ lifecycle state ----------------------------- */
+
+export const AGENT_STATES = ['active', 'paused', 'stopped'];
+
+/**
+ * Set an agent's lifecycle state.
+ *
+ * `stopped` is final: it also closes the autonomy window, so a stopped agent cannot be
+ * revived by flipping the state back. That is deliberate — "stop" should mean stopped, and
+ * an operator who wants it running again can initialize a fresh agent. `paused` leaves the
+ * window untouched, so the 48 hours keep elapsing while the agent sits idle.
+ */
+export function setAgentState(agentId, state) {
+  if (!AGENT_STATES.includes(state)) throw new Error(`Unknown agent state: ${state}`);
+  const now = new Date().toISOString();
+
+  if (state === 'stopped') {
+    db.prepare('UPDATE agents SET state = ?, state_changed_at = ?, expires_at = ? WHERE id = ?')
+      .run(state, now, now, agentId);
+  } else {
+    db.prepare('UPDATE agents SET state = ?, state_changed_at = ? WHERE id = ?').run(state, now, agentId);
+  }
+  return getAgent(agentId);
+}
+
+/** Rows created before the state column existed have no value; treat those as active. */
+export const agentState = (agent) => agent?.state || 'active';
 
 /** When the next autonomous cycle is due. */
 export function setNextCycle(agentId, nextCycleAt) {

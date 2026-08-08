@@ -21,6 +21,7 @@ export default function StatusPanel({ status, tick }) {
   }
 
   const { accepted, rejected, topicsEvaluated, cycleRunningNow } = status;
+  const paused = status.state === 'paused' || status.state === 'stopped';
   const acceptPct = topicsEvaluated ? (accepted / topicsEvaluated) * 100 : 0;
   const next = status.nextCycleAt ? countdown(status.nextCycleAt) : null;
 
@@ -31,9 +32,27 @@ export default function StatusPanel({ status, tick }) {
     <section className="card panel activity">
       <h2 className="panel-title">Activity</h2>
 
-      <div className={`next-cycle${cycleRunningNow ? ' next-cycle-running' : ''}`}>
-        <span className="next-label">{cycleRunningNow ? 'Cycle running' : 'Next cycle in'}</span>
-        <span className="next-value tabular">{cycleRunningNow ? '···' : next || '—'}</span>
+      {/* Manual state outranks the schedule here too: a paused agent counting down to a
+          cycle it will not run is worse than no number at all. */}
+      <div
+        className={`next-cycle${cycleRunningNow ? ' next-cycle-running' : ''}${
+          paused ? ' next-cycle-paused' : ''
+        }`}
+      >
+        <span className="next-label">
+          {cycleRunningNow
+            ? paused
+              ? 'Finishing current cycle'
+              : 'Cycle running'
+            : status.state === 'paused'
+              ? 'Paused'
+              : status.state === 'stopped'
+                ? 'Stopped'
+                : 'Next cycle in'}
+        </span>
+        <span className="next-value tabular">
+          {cycleRunningNow ? '···' : paused ? '❚❚' : next || '—'}
+        </span>
       </div>
 
       <div className="ratio">

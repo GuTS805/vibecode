@@ -50,6 +50,7 @@ export default function App() {
   const [banner, setBanner] = useState(null);
   const [showInit, setShowInit] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [lifecycleBusy, setLifecycleBusy] = useState(false);
   const [stage, setStage] = useState(null);
   const [toast, setToast] = useState(null);
   const [theme, toggleTheme] = useTheme();
@@ -201,7 +202,54 @@ export default function App() {
     }
   }
 
+  /**
+   * Pause / resume / stop.
+   *
+   * Stop is confirmed because it cannot be undone — it closes the autonomy window, and the
+   * only way back is a fresh agent. Pause and resume are cheap and reversible, so they act
+   * immediately without a prompt.
+   */
+  async function handleLifecycle(action) {
+    if (!activeId || lifecycleBusy) return;
+
+    const name = activeAgent?.name || 'This agent';
+    if (
+      action === 'stop' &&
+      !window.confirm(
+        `Stop ${name} permanently?\n\nIts autonomy window closes and it cannot be resumed — ` +
+          `you would need to initialize a new agent. Published posts are kept.\n\n` +
+          `To pause it temporarily instead, cancel and use Pause.`
+      )
+    ) {
+      return;
+    }
+
+    setLifecycleBusy(true);
+    try {
+      const fn = { pause: api.pauseAgent, resume: api.resumeAgent, stop: api.stopAgent }[action];
+      const result = await fn(activeId);
+      await Promise.all([loadAgentData(activeId, { silent: true }), loadAgents()]);
+      setToast(
+        result.unchanged
+          ? `${name} is already ${result.state}.`
+          : action === 'resume'
+            ? `${name} resumed — next cycle scheduled.`
+            : action === 'pause'
+              ? `${name} paused.${result.cycleStillFinishing ? ' A cycle already running will finish first.' : ''}`
+              : `${name} stopped.`
+      );
+      setTimeout(() => setToast(null), 6000);
+    } catch (err) {
+      setToast(err.message);
+      setTimeout(() => setToast(null), 6000);
+    } finally {
+      setLifecycleBusy(false);
+    }
+  }
+
   const activeAgent = agents.find((a) => a.agentId === activeId);
+  const agentLifecycle = status?.state || activeAgent?.state || 'active';
+  const isActive = agentLifecycle === 'active';
   const accent = useMemo(
     () => api.personaAccent(activeAgent?.domain || status?.persona?.domain),
     [activeAgent, status]
@@ -250,17 +298,34 @@ export default function App() {
 
         {activeId && (
           <>
-            <Header agent={activeAgent || status?.persona} status={status} tick={tick} />
+            <Header
+              agent={activeAgent || status?.persona}
+              status={status}
+              tick={tick}
+              onPause={() => handleLifecycle('pause')}
+              onResume={() => handleLifecycle('resume')}
+              onStop={() => handleLifecycle('stop')}
+              lifecycleBusy={lifecycleBusy}
+            />
 
             <div className="action-row">
-              <button className="btn btn-primary" onClick={handleTrigger} disabled={busy}>
+              <button
+                className="btn btn-primary"
+                onClick={handleTrigger}
+                disabled={busy || !isActive}
+                title={isActive ? undefined : `${activeAgent?.name || 'This agent'} is ${agentLifecycle}`}
+              >
                 {busy ? <span className="spinner" /> : <span aria-hidden="true">▶</span>}
                 {busy ? 'Running…' : 'Run a cycle now'}
               </button>
               {stage && <span className="stage">{stage}</span>}
               {!stage && (
                 <span className="action-note muted small">
-                  Optional — it publishes on its own schedule regardless.
+                  {agentLifecycle === 'paused'
+                    ? 'Paused — it will not publish until you resume it.'
+                    : agentLifecycle === 'stopped'
+                      ? 'Stopped — this agent has finished for good.'
+                      : 'Optional — it publishes on its own schedule regardless.'}
                 </span>
               )}
             </div>
@@ -285,6 +350,7 @@ export default function App() {
                 <div role="tabpanel">
                   {tab === 'posts' && (
                     <Feed
+                      state={agentLifecycle}
                       posts={posts}
                       loading={loading}
                       error={error}
