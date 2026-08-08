@@ -37,6 +37,8 @@ apart to stay inside the free tier's daily quota (see
 - [API reference](#api-reference)
 - [Deployment](#deployment)
 - [Requirement mapping](#requirement-mapping)
+- [Providers: text and images](#providers-text-and-images)
+- [What makes the posts varied](#what-makes-the-posts-varied)
 - [Known constraints](#known-constraints)
 
 ---
@@ -365,11 +367,18 @@ nothing has been published yet.
       "text": "Anthropic released an eval harness for indirect prompt injection this week, and the interesting part is the threat model, not the score…",
       "rationale": "This is a primary artifact rather than an announcement, which is exactly the distinction I keep making… Sources: https://…",
       "sources": ["https://…"],
-      "tag": "Prompt Injection"
+      "tag": "Prompt Injection",
+      "takeaway": "The harness is worth reading for its threat model, not for the number it reports.",
+      "format": "analysis",
+      "imageUrl": "https://image.pollinations.ai/prompt/…"
     }
   ]
 }
 ```
+
+`takeaway`, `format`, and `imageUrl` are additive. Posts written before those columns existed
+return `null` for them and the UI renders text-only, so an existing database keeps working
+across the upgrade.
 
 ### `GET /api/debug/rejected?agentId=…`
 
@@ -481,6 +490,65 @@ Boot logs confirm the autonomy wiring:
 
 ---
 
+---
+
+## Providers: text and images
+
+The pipeline splits its two generative needs across two providers, because they have very
+different economics.
+
+| | Provider | Cost | Notes |
+|---|---|---|---|
+| **Post artwork** | Pollinations.ai (`sana`) | Free, no key, no signup | Every published post gets a generated hero image |
+| **Judging & writing** | Gemini, or Pollinations when funded | Free tier, small daily quota | Selected by `TEXT_PROVIDER` |
+
+### Why images are Pollinations and text is not
+
+Pollinations advertises both text and images. Probing it directly (2026-08-08) showed only
+one of those is actually free:
+
+- **Images work, unconditionally.** `https://image.pollinations.ai/prompt/...` returns a real
+  1024x640 JPEG in about 1.5 seconds with no key and no account. This is what illustrates
+  every post.
+- **Text requires a funded account.** Pollinations meters text in "pollen", and the anonymous
+  balance is exactly `0.0000`. Any prompt carrying real content is refused with
+  `402 PAYMENT_REQUIRED` — `this request costs ~0.0002 pollen, but this key has 0.0000`.
+  Bisected precisely: a 6-character prompt succeeds, 200 characters already fails, and
+  supplying a referrer in the body, as a header, or as a query parameter changes nothing.
+
+So `src/pollinations.js` implements both, and `src/llm.js` routes text to whichever provider
+is usable. Set `POLLINATIONS_TOKEN` (from <https://enter.pollinations.ai>) and text moves to
+Pollinations with no code change; without it, `auto` keeps text on Gemini so the pipeline
+keeps running rather than 402ing on every call. `/api/agent/status` reports which provider is
+actually live, so the running configuration is visible rather than assumed.
+
+### Discovery is provider-independent
+
+Grounded discovery — one Gemini call with Google Search — only exists on Gemini, so relying
+on it would have made the text provider unswappable. `src/feeds.js` adds a second path:
+Hacker News plus six RSS feeds, deduplicated across sources by topic key and ranked against
+the persona's beat. No LLM call, nothing metered, and every URL comes from a real feed
+response rather than from a model that might compose a plausible-looking one. `DISCOVERY_MODE`
+picks between them; `auto` also falls back to feeds when grounding quota runs out, so
+discovery degrades instead of stopping.
+
+## What makes the posts varied
+
+A single strong voice still produces a monotonous feed if every post is built the same way.
+Voice is held constant and *structure* is rotated instead — `src/pipeline.js` defines six
+formats (analysis, counterpoint, field note, threat model, context, scrutiny) and picks one
+that has not been used in the last three posts. The story's own character overrides the
+rotation where it should: an unverifiable vendor claim is always read skeptically.
+
+Each post also carries a **takeaway** — one sentence naming the point of the piece, not a
+summary of it — and an **image brief** written for that specific story. All three come back
+from a single write call rather than three, because the write step runs last in the cycle
+when the daily quota is already partly spent, and a model that just wrote the post is better
+placed to distil it than one told about it second-hand.
+
+Artwork is deliberately non-fatal: `attachImage()` never throws, so a failed or slow image
+downgrades the post to text-only instead of losing work the cycle already paid for.
+
 ## Known constraints
 
 **Gemini's JSON mode cannot be combined with search grounding.** Setting
@@ -552,3 +620,16 @@ persistence, and failure containment were exercised directly (see
 trade-off, but it is the first thing worth adding — `judgeCandidate`'s threshold override,
 `parseLooseJSON`'s repair path, `extractSearchResults`' domain derivation, and `topicKey`'s
 stemming are all pure functions and easy to pin down.
+
+**The image model ignores "no text".** `sana` renders a strip of garbled pseudo-text along the
+bottom edge of most images even with `nologo=true` and explicit negative prompting. Rather
+than hoping prompt wording fixes it, artwork is generated at 1024x640 and rendered into a 16:9
+box anchored to the top, so the bottom ~10% is cropped away deterministically. Verified against
+real output before and after.
+
+**Pollinations artwork URLs are regenerated, not stored.** The stored `image_url` is a
+Pollinations prompt URL with a fixed seed derived from the story key, so the same post always
+resolves to the same artwork. Generation is verified at publish time — the response must be a
+real image over 1KB — so a broken URL is never written into an append-only feed. The tradeoff
+is that images depend on Pollinations remaining reachable; the card hides the image entirely
+on load failure rather than showing a broken icon.

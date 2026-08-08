@@ -3,7 +3,7 @@
   "version": "2.0.0",
   "private": true,
   "type": "module",
-  "description": "An autonomous AI persona that discovers, judges, and publishes tech/AI posts on its own schedule, powered by Claude with web search.",
+  "description": "An autonomous AI persona that discovers, judges, and publishes illustrated tech/AI posts on its own schedule.",
   "engines": {
     "node": ">=20"
   },
@@ -13,13 +13,15 @@
     "dev:client": "npm --prefix client run dev",
     "build": "cd client && npm install --no-audit --no-fund && npm run build",
     "seed": "node scripts/seed-agents.js",
-    "voice-check": "node scripts/voice-check.js"
+    "voice-check": "node scripts/voice-check.js",
+    "image-check": "node scripts/image-check.js"
   },
   "dependencies": {
     "@google/genai": "^2.16.0",
     "better-sqlite3": "^11.10.0",
     "dotenv": "^16.4.7",
     "express": "^4.21.2",
-    "node-cron": "^3.0.3"
+    "node-cron": "^3.0.3",
+    "rss-parser": "^3.13.0"
   }
 }

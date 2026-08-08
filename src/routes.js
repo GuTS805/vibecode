@@ -6,7 +6,7 @@ import { resolvePersona, personaSystemPrompt, listRegistryPersonas } from './per
 import {
   primeFirstCycle, runCycleGuarded, schedulerInfo, AUTONOMY_HOURS, isRunning,
 } from './scheduler.js';
-import { getActiveModel } from './gemini.js';
+import { getActiveModel, getTextProvider } from './llm.js';
 
 export const router = Router();
 
@@ -94,6 +94,8 @@ router.get('/agent/status', (req, res) => {
     autonomyActive: sched.autonomyActive,
     cycleRunningNow: sched.isRunningNow,
     model: getActiveModel(),
+    textProvider: getTextProvider(),
+    imageProvider: process.env.POST_IMAGES === 'false' ? 'disabled' : 'pollinations',
   });
 });
 
@@ -152,7 +154,10 @@ router.post('/agent/trigger', async (req, res) => {
     const result = await runCycleGuarded(agent.id, 'manual');
     res.json({ ok: true, ...result });
   } catch (err) {
-    if (err.code === 'RATE_LIMITED' || err.code === 'GROUNDING_QUOTA') {
+    if (err.code === 'POLLINATIONS_UNFUNDED') {
+      return res.status(503).json({ error: err.message, code: err.code });
+    }
+    if (err.code === 'RATE_LIMITED' || err.code === 'GROUNDING_QUOTA' || err.code === 'POLLINATIONS_RATE_LIMITED') {
       console.warn(`[trigger] ${err.code}`);
       return res.status(429).json({
         error: err.message,
@@ -192,6 +197,7 @@ router.get('/health', (_req, res) => {
     ok: true,
     agents: listAgents().length,
     model: getActiveModel(),
+    textProvider: getTextProvider(),
     uptime: process.uptime(),
   });
 });

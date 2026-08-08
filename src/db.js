@@ -71,6 +71,12 @@ ensureColumn('posts', 'title', 'title TEXT');
 ensureColumn('posts', 'score', 'score INTEGER');
 ensureColumn('rejections', 'url', 'url TEXT');
 ensureColumn('rejections', 'score', 'score INTEGER');
+// Post presentation: generated artwork plus the structure that makes a feed of posts read
+// as varied rather than as one template repeated.
+ensureColumn('posts', 'image_url', 'image_url TEXT');
+ensureColumn('posts', 'image_prompt', 'image_prompt TEXT');
+ensureColumn('posts', 'takeaway', 'takeaway TEXT');
+ensureColumn('posts', 'format', 'format TEXT');
 
 export const nowISO = () => new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
 export const newId = (prefix) => `${prefix}${randomUUID().slice(0, 8)}`;
@@ -123,12 +129,20 @@ export function touchLastCycle(agentId) {
 
 /* ---------------------------------- posts ---------------------------------- */
 
-export function insertPost({ agentId, title, text, rationale, sources, topicKey, tag, score }) {
+export function insertPost({
+  agentId, title, text, rationale, sources, topicKey, tag, score,
+  imageUrl = null, imagePrompt = null, takeaway = null, format = null,
+}) {
   const id = newId('p');
   db.prepare(
-    `INSERT INTO posts (id, agent_id, title, text, rationale, sources, topic_key, tag, score, created_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-  ).run(id, agentId, title, text, rationale, JSON.stringify(sources || []), topicKey, tag, score, nowISO());
+    `INSERT INTO posts
+       (id, agent_id, title, text, rationale, sources, topic_key, tag, score,
+        image_url, image_prompt, takeaway, format, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(
+    id, agentId, title, text, rationale, JSON.stringify(sources || []), topicKey, tag, score,
+    imageUrl, imagePrompt, takeaway, format, nowISO()
+  );
   return id;
 }
 
@@ -140,10 +154,16 @@ export function getPosts(agentId) {
     .map((r) => ({
       id: r.id,
       createdAt: r.created_at,
+      title: r.title || null,
       text: r.text,
       rationale: r.rationale,
       sources: safeParse(r.sources),
       tag: r.tag || null,
+      // Additive: posts written before these columns existed return null and the UI
+      // renders them text-only rather than breaking.
+      imageUrl: r.image_url || null,
+      takeaway: r.takeaway || null,
+      format: r.format || null,
     }));
 }
 
@@ -184,7 +204,9 @@ const MEMORY_POSTS = Number(process.env.MEMORY_POSTS || 20);
  */
 export function getMemory(agentId) {
   const published = db
-    .prepare('SELECT title, text, topic_key, created_at FROM posts WHERE agent_id = ? ORDER BY rowid DESC LIMIT ?')
+    .prepare(
+      'SELECT title, text, topic_key, created_at, format FROM posts WHERE agent_id = ? ORDER BY rowid DESC LIMIT ?'
+    )
     .all(agentId, MEMORY_POSTS);
 
   const allKeys = db
@@ -203,6 +225,8 @@ export function getMemory(agentId) {
     })),
     publishedTopics: published.map((p) => p.title).filter(Boolean),
     seenKeys: new Set(allKeys.map((r) => r.topic_key).filter(Boolean)),
+    // Newest first: the writer avoids the structures it just used.
+    recentFormats: published.map((p) => p.format).filter(Boolean),
   };
 }
 

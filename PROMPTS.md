@@ -461,3 +461,89 @@ directly.
 **Not verified:** a live cycle for any of the five new personas. Grounding quota was exhausted
 before one could be run, and no configuration change can work around it — it needs either the
 midnight Pacific reset or a different Google Cloud project.
+
+---
+
+## 4 — Switch to Pollinations.ai and illustrate the posts (2026-08-08)
+
+**Request:** replace the Gemini key with Pollinations.ai, "which generates texts and image as
+well", and make the posts more versatile with good text and images.
+
+### What Pollinations actually provides
+
+Probed before writing any code, because the whole request rests on what the API can do:
+
+| | Result |
+|---|---|
+| Images (`sana`) | ✅ Free, no key, no signup. Real 1024x640 JPEG in ~1.5s. |
+| Text (`openai-fast`) | ❌ `402 PAYMENT_REQUIRED` — *"this request costs ~0.0002 pollen, but this key has 0.0000"* |
+
+The text failure is not a rate limit that clears. Pollinations moved text to a "pollen"
+balance and the anonymous balance is exactly zero, so any request that costs anything is
+refused. Bisected to be certain: a 6-character prompt succeeds, 200 characters already fails,
+and 0/4 realistic pipeline-sized prompts succeeded. Supplying a referrer — in the body, as a
+header, and as a query parameter — changed nothing. The `/openai` compatibility path 402s
+even where the plain path works.
+
+So "replace Gemini with Pollinations" is only half-possible, and the half that works is the
+half that was missing. Rather than swapping text to a provider that fails 100% of real calls,
+or stopping to ask:
+
+- **Images moved to Pollinations completely.** Every published post now gets generated
+  artwork. Free, no key, no quota — a strict improvement over having no images.
+- **Text became a routed choice** (`src/llm.js`). The Pollinations text client is implemented
+  and correct, and activates the moment `POLLINATIONS_TOKEN` is set. Until then `auto` keeps
+  text on Gemini so the pipeline runs. `/api/agent/status` reports which provider is live.
+
+### Discovery had to stop depending on Gemini
+
+Discovery was one Gemini call with Google Search grounding, which no other provider has —
+meaning the text provider was not actually swappable, whatever the router said. Added
+`src/feeds.js`: Hacker News plus six RSS feeds, deduplicated across sources and ranked against
+the persona's beat. No LLM call, nothing metered, and every URL comes from a real feed
+response, so the class of bug the grounded path defends against with redirect resolution and
+domain verification cannot occur here. `DISCOVERY_MODE=auto` also falls back to feeds when
+grounding quota runs out, so discovery degrades instead of stopping.
+
+### Making posts varied rather than merely longer
+
+"More versatile" was read as structural variety, not more words. A strong voice repeated
+across every post still reads as one template. So the voice is held constant and the
+*structure* rotates: six formats (analysis, counterpoint, field note, threat model, context,
+scrutiny), choosing one unused in the last three posts, with the story's character overriding
+the rotation where it should — an unverifiable vendor claim is always read skeptically.
+
+Each post also gained a **takeaway** (the point, not a summary) and a per-story **image
+brief**. All three come back from one write call rather than three: the write step runs last,
+when the daily quota is already partly spent, and a model that just wrote the post is better
+placed to distil it than one told about it second-hand.
+
+### Problems found and fixed
+
+**The image model ignores "no text".** `sana` renders garbled pseudo-text along the bottom
+edge even with `nologo=true` and explicit negative prompting — confirmed by inspecting real
+output, not assumed. Prompt wording was not going to fix a model-level habit, so artwork is
+generated at 1024x640 and rendered into a 16:9 box anchored to the top, cropping the bottom
+~10% away deterministically. Verified gone by re-rendering.
+
+**Stale stories were outranking fresh ones.** Feed ranking weighted beat relevance at 2x,
+which let a 25-day-old Krebs piece outrank the day's news purely by being more on-topic —
+spending a judging call on something the TIMELINESS standard would reject anyway. Anything
+past a week is now discounted hard rather than excluded, so a genuinely major older story can
+still surface.
+
+**Artwork must never cost a cycle its work.** `attachImage()` runs after the post exists and
+cannot throw; a failed or slow image downgrades the post to text-only. Generation is verified
+at publish time (real image, over 1KB) so a broken URL is never written into an append-only
+feed, and the card removes the element on load failure instead of showing a broken icon.
+
+**A live cycle could not verify any of this.** The judge rejects most real candidates by
+design, so a run that publishes nothing is a working run and proves nothing about the write
+path — 0/6 published across three attempts, all for legitimate editorial reasons. Added
+`npm run image-check`, which drives the real `writePost`/`attachImage` against a fixed
+synthetic candidate, so the write-and-illustrate path is testable independently of the day's
+news. Rendering was then verified in headless Chrome at 390px: 10/10 checks, images confirmed
+loaded at their natural size rather than merely present in the DOM.
+
+Also surfaced during this work: `gemini-2.5-flash` has since become unavailable on this key
+and the fallback chain correctly dropped it mid-run and continued on `gemini-3.5-flash`.

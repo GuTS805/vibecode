@@ -1,5 +1,15 @@
-import { complete, SEARCH_TOOL, parseLooseJSON, withRetry } from './gemini.js';
+import { complete, SEARCH_TOOL, parseLooseJSON, withRetry, supportsGrounding } from './llm.js';
 import { personaSystemPrompt } from './persona.js';
+
+/**
+ * Which discovery strategy to use.
+ *
+ *   auto     (default) grounded search when the active text provider supports it,
+ *            otherwise feeds. Also falls back to feeds when grounding quota runs out.
+ *   feeds    Hacker News + RSS. No LLM call, no quota, URLs real by construction.
+ *   grounded One Gemini call with Google Search.
+ */
+const DISCOVERY_MODE = (process.env.DISCOVERY_MODE || 'auto').toLowerCase();
 
 /** Words too generic to identify a story; dropped before building the dedup key. */
 const STOPWORDS = new Set([
@@ -148,6 +158,29 @@ Return ONLY JSON in exactly this shape, with no prose before or after:
  * credibility standard on the record.
  */
 export async function discoverTopics(persona, memory) {
+  const useGrounding =
+    DISCOVERY_MODE === 'grounded' || (DISCOVERY_MODE === 'auto' && supportsGrounding());
+
+  if (!useGrounding) {
+    const { discoverFromFeeds } = await import('./feeds.js');
+    return discoverFromFeeds(persona, memory);
+  }
+
+  try {
+    return await discoverGrounded(persona, memory);
+  } catch (err) {
+    // Grounding is metered separately and project-wide, so when it runs out no model can
+    // serve a grounded call. Feeds keep discovery alive instead of idling the whole cycle.
+    if (err.code === 'GROUNDING_QUOTA' && DISCOVERY_MODE === 'auto') {
+      console.warn('[discovery] grounding quota exhausted — falling back to feeds');
+      const { discoverFromFeeds } = await import('./feeds.js');
+      return discoverFromFeeds(persona, memory);
+    }
+    throw err;
+  }
+}
+
+async function discoverGrounded(persona, memory) {
   const { text, searchResults } = await withRetry(
     () =>
       complete({

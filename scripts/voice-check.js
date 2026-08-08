@@ -21,7 +21,7 @@
 import 'dotenv/config';
 import { db, getAgent, loadPersona } from '../src/db.js';
 import { personaSystemPrompt, lintVoice } from '../src/persona.js';
-import { completeJSON } from '../src/gemini.js';
+import { completeJSON } from '../src/llm.js';
 
 const PASS_MARK = 70;
 
