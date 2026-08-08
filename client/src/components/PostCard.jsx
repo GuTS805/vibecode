@@ -180,7 +180,10 @@ export default function PostCard({ post, isNew, author }) {
               </span>
               {open ? 'Hide editorial reasoning' : 'Why this topic?'}
             </button>
-            {formatLabel && <span className="post-format-mark">{formatLabel}</span>}
+            <span className="post-footer-marks">
+              {formatLabel && <span className="post-format-mark">{formatLabel}</span>}
+              <TweetBadge tweet={post.tweet} />
+            </span>
           </div>
 
           <div className={`collapsible${open ? ' collapsible-open' : ''}`}>
@@ -192,6 +195,45 @@ export default function PostCard({ post, isNew, author }) {
         </footer>
       </div>
     </article>
+  );
+}
+
+/**
+ * Whether and how this post was promoted to X.
+ *
+ * Three distinct states, not two: a real tweet (a link out), a dry-run tweet (a preview of
+ * what would have been sent, since dry run is the honest default until credentials are
+ * confirmed working — see twitter.js), and a failed attempt (surfaced rather than hidden,
+ * since a silently-failing integration is worse than an absent one). No badge at all when
+ * tweeting was never attempted, which is the common case for most posts.
+ */
+function TweetBadge({ tweet }) {
+  if (!tweet) return null;
+
+  if (tweet.error) {
+    return (
+      <span className="tweet-mark tweet-mark-error" title={tweet.error}>
+        ⚠ tweet failed
+      </span>
+    );
+  }
+  if (tweet.dryRun) {
+    return (
+      <span className="tweet-mark tweet-mark-dry" title={tweet.text}>
+        𝕏 dry-run preview
+      </span>
+    );
+  }
+  return (
+    <a
+      className="tweet-mark tweet-mark-live"
+      href={tweet.url}
+      target="_blank"
+      rel="noopener noreferrer"
+      title={tweet.text}
+    >
+      𝕏 tweeted ↗
+    </a>
   );
 }
 

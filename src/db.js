@@ -82,6 +82,20 @@ ensureColumn('posts', 'image_url', 'image_url TEXT');
 ensureColumn('posts', 'image_prompt', 'image_prompt TEXT');
 ensureColumn('posts', 'takeaway', 'takeaway TEXT');
 ensureColumn('posts', 'format', 'format TEXT');
+// X (Twitter) posting: an opt-in per agent, decoupled from the discover/judge/write cycle so
+// tweeting runs on its own cadence and a cycle that publishes two posts does not tweet twice
+// in the same breath.
+ensureColumn('agents', 'twitter_enabled', 'twitter_enabled INTEGER NOT NULL DEFAULT 0');
+ensureColumn('agents', 'next_tweet_at', 'next_tweet_at TEXT');
+ensureColumn('agents', 'last_tweet_at', 'last_tweet_at TEXT');
+// Recorded per post rather than in a separate table: a tweet is an attribute of the post it
+// promotes, and posts are already the append-only record everything else hangs off.
+ensureColumn('posts', 'tweet_id', 'tweet_id TEXT');
+ensureColumn('posts', 'tweet_url', 'tweet_url TEXT');
+ensureColumn('posts', 'tweet_text', 'tweet_text TEXT');
+ensureColumn('posts', 'tweet_posted_at', 'tweet_posted_at TEXT');
+ensureColumn('posts', 'tweet_dry_run', 'tweet_dry_run INTEGER');
+ensureColumn('posts', 'tweet_error', 'tweet_error TEXT');
 
 export const nowISO = () => new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
 export const newId = (prefix) => `${prefix}${randomUUID().slice(0, 8)}`;
@@ -197,6 +211,21 @@ export function getPosts(agentId) {
       imageUrl: r.image_url || null,
       takeaway: r.takeaway || null,
       format: r.format || null,
+      // tweet_posted_at is stamped on every attempt, success or failure, so a failed post is
+      // not retried forever against a permanent cause. `postedAt` is therefore only set on
+      // the JSON side when the attempt actually succeeded; a failed attempt surfaces through
+      // `error` instead, with `attemptedAt` recording when it was tried.
+      tweet: r.tweet_posted_at
+        ? {
+            id: r.tweet_id || null,
+            url: r.tweet_url || null,
+            text: r.tweet_text || null,
+            dryRun: Boolean(r.tweet_dry_run),
+            error: r.tweet_error || null,
+            attemptedAt: r.tweet_posted_at,
+            postedAt: r.tweet_error ? null : r.tweet_posted_at,
+          }
+        : null,
     }));
 }
 
@@ -261,6 +290,64 @@ export function getMemory(agentId) {
     // Newest first: the writer avoids the structures it just used.
     recentFormats: published.map((p) => p.format).filter(Boolean),
   };
+}
+
+/* --------------------------------- twitter ----------------------------------- */
+
+export function setTwitterEnabled(agentId, enabled) {
+  db.prepare('UPDATE agents SET twitter_enabled = ? WHERE id = ?').run(enabled ? 1 : 0, agentId);
+  return getAgent(agentId);
+}
+
+export const twitterEnabled = (agent) => Boolean(agent?.twitter_enabled);
+
+export function setNextTweet(agentId, nextAt) {
+  db.prepare('UPDATE agents SET next_tweet_at = ? WHERE id = ?').run(nextAt, agentId);
+}
+
+export function touchLastTweet(agentId) {
+  db.prepare('UPDATE agents SET last_tweet_at = ? WHERE id = ?').run(new Date().toISOString(), agentId);
+}
+
+/**
+ * The oldest published post this agent has not yet attempted to tweet.
+ *
+ * Oldest first, not newest: tweeting is decoupled from the write cycle and runs slower, so a
+ * burst of two or three posts from one cycle should reach the timeline in the order they were
+ * published rather than the most recent one jumping the queue.
+ */
+export function getNextUntweetedPost(agentId) {
+  return db
+    .prepare(
+      `SELECT * FROM posts WHERE agent_id = ? AND tweet_posted_at IS NULL
+       ORDER BY datetime(created_at) ASC, rowid ASC LIMIT 1`
+    )
+    .get(agentId);
+}
+
+/**
+ * Record the outcome of a tweet attempt against the post it promotes.
+ *
+ * A failure is recorded too (as an error, with tweet_posted_at left null) rather than left
+ * unmarked, so a transient failure does not retry the same post forever if the underlying
+ * cause is not transient — the caller decides whether to leave it eligible for the next tick
+ * or to mark it permanently attempted.
+ */
+export function recordTweetResult(postId, { tweetId = null, tweetUrl = null, tweetText, dryRun, error = null, attempted = true }) {
+  db.prepare(
+    `UPDATE posts SET
+       tweet_id = ?, tweet_url = ?, tweet_text = ?, tweet_dry_run = ?, tweet_error = ?,
+       tweet_posted_at = ?
+     WHERE id = ?`
+  ).run(
+    tweetId,
+    tweetUrl,
+    tweetText,
+    dryRun ? 1 : 0,
+    error,
+    attempted ? nowISO() : null,
+    postId
+  );
 }
 
 export function countStats(agentId) {

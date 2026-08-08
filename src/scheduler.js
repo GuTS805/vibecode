@@ -1,6 +1,11 @@
 import cron from 'node-cron';
-import { listAgents, setNextCycle, touchLastCycle, getAgent, agentState, setAgentState, db } from './db.js';
+import {
+  listAgents, setNextCycle, touchLastCycle, getAgent, agentState, setAgentState, db,
+  twitterEnabled, setTwitterEnabled, setNextTweet, touchLastTweet, getNextUntweetedPost,
+  recordTweetResult,
+} from './db.js';
 import { runCycle } from './pipeline.js';
+import { postTweet, composeTweet, isDryRun } from './twitter.js';
 
 const HOUR = 3_600_000;
 
@@ -71,6 +76,38 @@ export function cadenceDescription() {
 /** How soon to retry after a transient failure, rather than losing the whole slot. */
 const RETRY_DELAY_MS = Number(process.env.CYCLE_RETRY_MINUTES || 10) * 60_000;
 
+/* ------------------------------- tweet cadence -------------------------------- */
+
+/**
+ * Tweeting runs on its own schedule, independent of the discover/judge/write cycle.
+ *
+ * Decoupling matters for two reasons. First, a cycle that publishes two posts should not
+ * tweet both back to back — that reads as spam on a timeline in a way it does not in a
+ * scrolling feed. Second, "post a tweet every so often" and "write a new post every so
+ * often" are different cadences the operator may want to tune separately: someone might want
+ * five posts written per day but only two tweeted.
+ */
+const TWEET_MIN_H = Number(process.env.TWEET_MIN_HOURS || 3);
+const TWEET_MAX_H = Number(process.env.TWEET_MAX_HOURS || 5);
+
+/** No published post waiting yet — check again soon rather than waiting a full interval. */
+const TWEET_WAIT_FOR_CONTENT_MS = Number(process.env.TWEET_WAIT_MINUTES || 20) * 60_000;
+
+/** Backoff after an account-level failure (auth, rate limit) that no specific post caused. */
+const TWEET_RETRY_MS = Number(process.env.TWEET_RETRY_MINUTES || 15) * 60_000;
+
+function nextTweetInterval() {
+  return (TWEET_MIN_H + Math.random() * (TWEET_MAX_H - TWEET_MIN_H)) * HOUR;
+}
+
+export function scheduleNextTweet(agentId, fromMs = Date.now(), delayMs = nextTweetInterval()) {
+  const next = new Date(fromMs + delayMs).toISOString();
+  setNextTweet(agentId, next);
+  return next;
+}
+
+export const tweetCadenceDescription = () => `${TWEET_MIN_H}-${TWEET_MAX_H} hours`;
+
 export function scheduleNext(agentId, fromMs = Date.now()) {
   const next = new Date(fromMs + nextInterval()).toISOString();
   setNextCycle(agentId, next);
@@ -79,6 +116,22 @@ export function scheduleNext(agentId, fromMs = Date.now()) {
 
 /** In-flight guard so a slow cycle can't overlap itself or race the trigger endpoint. */
 const running = new Set();
+
+/** Same purpose as `running`, kept separate: a cycle and a tweet attempt for the same agent
+ *  can legitimately overlap — writing and promoting are independent operations. */
+const tweeting = new Set();
+export const isTweeting = (agentId) => tweeting.has(agentId);
+
+/** Manual "tweet now", parallel to runCycleGuarded — used by the API and for testing. */
+export async function tweetNowGuarded(agentId) {
+  if (tweeting.has(agentId)) return { tweeted: false, reason: 'tweet-already-in-flight' };
+  tweeting.add(agentId);
+  try {
+    return await tweetOne(agentId);
+  } finally {
+    tweeting.delete(agentId);
+  }
+}
 
 export async function runCycleGuarded(agentId, trigger) {
   if (running.has(agentId)) {
@@ -138,7 +191,8 @@ export function primeFirstCycle(agentId, delayMs = 12_000) {
 export function startScheduler() {
   const task = cron.schedule('*/5 * * * *', tick, { scheduled: true });
   console.log(
-    `[scheduler] started — tick every 5min, cadence ${cadenceDescription()}, autonomy window ${AUTONOMY_HOURS}h`
+    `[scheduler] started — tick every 5min, cadence ${cadenceDescription()}, autonomy window ${AUTONOMY_HOURS}h, ` +
+      `tweet cadence ${tweetCadenceDescription()}${isDryRun() ? ' (DRY RUN)' : ''}`
   );
   // Catch up immediately on boot for anything already overdue.
   setTimeout(tick, 5_000).unref?.();
@@ -150,27 +204,42 @@ async function tick() {
   for (const agent of listAgents()) {
     // Manual control wins over the schedule. Checked on every tick rather than cached, so
     // pausing takes effect at the next tick without needing to reach into the scheduler.
-    if (agentState(agent) !== 'active') continue;
+    const active = agentState(agent) === 'active';
+    const withinWindow = now < new Date(agent.expires_at).getTime();
 
-    const expires = new Date(agent.expires_at).getTime();
-    if (now >= expires) continue; // 48h autonomy window elapsed
+    if (active && withinWindow) {
+      const due = agent.next_cycle_at ? new Date(agent.next_cycle_at).getTime() : 0;
+      if (now >= due) {
+        // Reschedule before running so a failure can't wedge the agent into a retry loop.
+        scheduleNext(agent.id, now);
+        try {
+          await runCycleGuarded(agent.id, 'cron');
+        } catch (err) {
+          // A failed cycle is survivable by design: the loop keeps ticking either way.
+          // Transient causes (rate limit, network, a truncated response) get a short retry
+          // instead of forfeiting the slot; anything else waits for the normal cadence.
+          console.error(`[scheduler] cycle failed for ${agent.id} (${err.code || 'ERR'}):`, err.message);
+          if (err.retryable) {
+            const retryAt = new Date(Date.now() + RETRY_DELAY_MS).toISOString();
+            setNextCycle(agent.id, retryAt);
+            console.log(`[scheduler] retrying ${agent.id} at ${retryAt}`);
+          }
+        }
+      }
+    }
 
-    const due = agent.next_cycle_at ? new Date(agent.next_cycle_at).getTime() : 0;
-    if (now < due) continue;
-
-    // Reschedule before running so a failure can't wedge the agent into a retry loop.
-    scheduleNext(agent.id, now);
-    try {
-      await runCycleGuarded(agent.id, 'cron');
-    } catch (err) {
-      // A failed cycle is survivable by design: the loop keeps ticking either way.
-      // Transient causes (rate limit, network, a truncated response) get a short retry
-      // instead of forfeiting the slot; anything else waits for the normal cadence.
-      console.error(`[scheduler] cycle failed for ${agent.id} (${err.code || 'ERR'}):`, err.message);
-      if (err.retryable) {
-        const retryAt = new Date(Date.now() + RETRY_DELAY_MS).toISOString();
-        setNextCycle(agent.id, retryAt);
-        console.log(`[scheduler] retrying ${agent.id} at ${retryAt}`);
+    // Tweeting has its own on/off switch and its own due-time, checked independently of the
+    // write cycle above — an agent can be actively writing but have tweeting paused, or the
+    // reverse would be pointless (nothing to tweet) but is not specifically guarded against.
+    if (active && withinWindow && twitterEnabled(agent) && !tweeting.has(agent.id)) {
+      const tweetDue = agent.next_tweet_at ? new Date(agent.next_tweet_at).getTime() : 0;
+      if (now >= tweetDue) {
+        tweeting.add(agent.id);
+        try {
+          await tweetOne(agent.id);
+        } finally {
+          tweeting.delete(agent.id);
+        }
       }
     }
   }
@@ -216,6 +285,75 @@ export function setLifecycle(agentId, state) {
   return getAgent(agentId);
 }
 
+/**
+ * Turn tweeting on or off for an agent. Decoupled from `setLifecycle` deliberately — pausing
+ * or stopping the write cycle and enabling/disabling tweeting are independent switches, since
+ * an operator might want the agent to keep writing while its tweets are paused, or vice versa
+ * (though tweeting with nothing new to promote just idles until a post exists).
+ */
+export function setTweeting(agentId, enabled) {
+  const agent = setTwitterEnabled(agentId, enabled);
+  if (enabled) {
+    // Check soon rather than waiting a full interval, so enabling it on an agent that
+    // already has an unpromoted post tweets it promptly instead of hours later.
+    scheduleNextTweet(agentId, Date.now(), 60_000);
+  } else {
+    setNextTweet(agentId, null);
+  }
+  console.log(`[scheduler] agent ${agentId} tweeting -> ${enabled ? 'enabled' : 'disabled'}`);
+  return agent;
+}
+
+/**
+ * One tweet attempt for one agent.
+ *
+ * The distinction that matters here is *who* a failure belongs to. A rejection tied to this
+ * specific post (X refuses it as duplicate content, for instance) should not be retried
+ * against the same post forever, so it is recorded and the queue moves on. A rejection tied
+ * to the account (bad credentials, a billing gate, a rate limit) has nothing to do with which
+ * post was chosen, so the post is left untouched and eligible, and only the account-level
+ * retry timer backs off.
+ */
+async function tweetOne(agentId) {
+  const post = getNextUntweetedPost(agentId);
+  if (!post) {
+    scheduleNextTweet(agentId, Date.now(), TWEET_WAIT_FOR_CONTENT_MS);
+    return { tweeted: false, reason: 'nothing-to-tweet' };
+  }
+
+  const text = composeTweet({ takeaway: post.takeaway, text: post.text, sources: JSON.parse(post.sources || '[]') });
+
+  try {
+    const result = await postTweet({ text, imageUrl: post.image_url });
+    recordTweetResult(post.id, {
+      tweetId: result.id,
+      tweetUrl: result.url,
+      tweetText: result.text,
+      dryRun: result.dryRun,
+    });
+    touchLastTweet(agentId);
+    scheduleNextTweet(agentId);
+    console.log(
+      `[twitter] ${result.dryRun ? '[dry-run] ' : ''}tweeted post ${post.id} for agent ${agentId}` +
+        (result.url ? ` -> ${result.url}` : '')
+    );
+    return { tweeted: true, dryRun: result.dryRun, postId: post.id };
+  } catch (err) {
+    const postSpecific = err.code === 'FORBIDDEN';
+    if (postSpecific) {
+      recordTweetResult(post.id, { tweetText: text, dryRun: isDryRun(), error: err.message });
+      scheduleNextTweet(agentId);
+    } else {
+      // Account-level: leave the post untouched so it is retried once the underlying cause
+      // (auth, billing, rate limit) clears, rather than burning through the whole queue
+      // marking every post as failed for a problem none of them caused.
+      scheduleNextTweet(agentId, Date.now(), err.retryAfter ? err.retryAfter * 1000 + 1000 : TWEET_RETRY_MS);
+    }
+    console.error(`[twitter] failed for agent ${agentId} (${err.code || 'ERR'}): ${err.message}`);
+    return { tweeted: false, reason: err.code || 'ERROR', error: err.message };
+  }
+}
+
 export function schedulerInfo(agentId) {
   const a = getAgent(agentId);
   if (!a) return null;
@@ -236,6 +374,13 @@ export function schedulerInfo(agentId) {
     autonomyActive: state === 'active' && windowOpen,
     cycleCadence: cadenceDescription(),
     isRunningNow: running.has(a.id),
+    twitter: {
+      enabled: twitterEnabled(a),
+      nextTweetAt: twitterEnabled(a) && state === 'active' && windowOpen ? a.next_tweet_at : null,
+      lastTweetAt: a.last_tweet_at,
+      cadence: tweetCadenceDescription(),
+      isTweetingNow: tweeting.has(a.id),
+    },
   };
 }
 

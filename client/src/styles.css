@@ -557,11 +557,23 @@ a { color: var(--accent); }
 
 .post-footer { margin-top: 16px; padding-top: 13px; border-top: 1px solid var(--border-soft); }
 .post-footer-row { display: flex; align-items: center; gap: 10px; }
+.post-footer-marks { margin-left: auto; display: flex; align-items: center; gap: 10px; }
 .post-format-mark {
-  margin-left: auto;
   font-size: 11px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase;
   color: var(--text-faint);
 }
+
+.tweet-mark {
+  display: inline-flex; align-items: center; gap: 4px;
+  font-size: 11px; font-weight: 600;
+  text-decoration: none;
+  padding: 2px 8px; border-radius: 999px;
+  border: 1px solid transparent;
+}
+.tweet-mark-live { color: var(--accent); background: var(--accent-soft); border-color: var(--accent-line); }
+.tweet-mark-live:hover { text-decoration: underline; }
+.tweet-mark-dry { color: var(--text-faint); background: var(--surface-2); border-color: var(--border); }
+.tweet-mark-error { color: var(--bad); background: var(--bad-bg); border-color: color-mix(in srgb, var(--bad) 30%, transparent); }
 
 .sources { display: flex; flex-wrap: wrap; gap: 7px; margin-bottom: 11px; }
 .source-link {
@@ -858,3 +870,43 @@ a { color: var(--accent); }
 
 /* Lifecycle glyphs sit still; the active empty state's glyph spins. */
 .empty-glyph-still { animation: none !important; }
+
+/* ------------------------------- TwitterPanel -------------------------------- */
+
+.twitter-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 4px; }
+
+/* A small custom checkbox-driven switch — no library, just enough affordance to read
+   unambiguously as on/off at a glance, which a plain checkbox does not. */
+.switch { position: relative; display: inline-block; cursor: pointer; }
+.switch input {
+  position: absolute; opacity: 0; width: 1px; height: 1px;
+}
+.switch-track {
+  display: block; width: 38px; height: 22px; border-radius: 999px;
+  background: var(--surface-2); border: 1px solid var(--border);
+  transition: background .18s, border-color .18s;
+}
+.switch-thumb {
+  display: block; width: 16px; height: 16px; margin: 2px; border-radius: 50%;
+  background: var(--text-faint);
+  transition: transform .18s ease, background .18s;
+}
+.switch input:checked + .switch-track { background: var(--accent-soft); border-color: var(--accent-line); }
+.switch input:checked + .switch-track .switch-thumb { transform: translateX(16px); background: var(--accent); }
+.switch input:disabled + .switch-track { opacity: .5; cursor: not-allowed; }
+.switch input:focus-visible + .switch-track { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.twitter-note {
+  margin: 6px 0 14px;
+  padding: 9px 11px;
+  border-radius: var(--radius-sm);
+  font-size: 12.5px; line-height: 1.55;
+  border: 1px solid var(--border);
+  background: var(--surface-2);
+  color: var(--text-dim);
+}
+.twitter-note code { font-size: 11px; padding: 1px 4px; border-radius: 4px; background: var(--surface-hover); }
+.twitter-note-warn { border-color: color-mix(in srgb, var(--bad) 28%, transparent); background: var(--bad-bg); color: var(--bad); }
+.twitter-note-dry { border-color: color-mix(in srgb, var(--warn) 28%, transparent); background: var(--warn-bg); color: var(--warn); }
+
+.twitter-stats { margin: 4px 0 10px; }

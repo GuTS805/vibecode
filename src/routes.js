@@ -1,12 +1,15 @@
 import { Router } from 'express';
 import {
   createAgent, getAgent, listAgents, getPosts, getRejections, countStats, loadPersona, agentState,
+  twitterEnabled,
 } from './db.js';
 import { resolvePersona, personaSystemPrompt, listRegistryPersonas } from './persona.js';
 import {
   primeFirstCycle, runCycleGuarded, schedulerInfo, AUTONOMY_HOURS, isRunning, setLifecycle,
+  setTweeting, tweetNowGuarded, isTweeting,
 } from './scheduler.js';
 import { getActiveModel, getTextProvider } from './llm.js';
+import { isConfigured as twitterConfigured, isDryRun as twitterDryRun, verifyCredentials } from './twitter.js';
 
 export const router = Router();
 
@@ -96,6 +99,11 @@ router.get('/agent/status', (req, res) => {
     // Manual lifecycle: 'active' | 'paused' | 'stopped'.
     state: sched.state,
     stateChangedAt: sched.stateChangedAt,
+    twitter: {
+      ...sched.twitter,
+      configured: twitterConfigured(),
+      dryRun: twitterDryRun(),
+    },
     model: getActiveModel(),
     textProvider: getTextProvider(),
     imageProvider: process.env.POST_IMAGES === 'false' ? 'disabled' : 'pollinations',
@@ -241,6 +249,107 @@ router.post('/agent/pause', lifecycleHandler('paused'));
 router.post('/agent/resume', lifecycleHandler('active'));
 router.post('/agent/stop', lifecycleHandler('stopped'));
 
+/* ------------------------- X (Twitter) posting -------------------------- */
+
+/**
+ * Turn tweeting on or off for an agent. Independent of pause/resume/stop — those control
+ * whether the agent keeps writing, this controls whether its posts get promoted to X.
+ * Enabling schedules a check within a minute rather than the full interval, so an agent that
+ * already has an unpromoted post tweets it promptly instead of hours later.
+ */
+router.post('/agent/twitter/enable', (req, res) => {
+  const agent = requireAgent(req, res);
+  if (!agent) return;
+  setTweeting(agent.id, true);
+  res.json({
+    ok: true,
+    agentId: agent.id,
+    enabled: true,
+    dryRun: twitterDryRun(),
+    configured: twitterConfigured(),
+    nextTweetAt: schedulerInfo(agent.id).twitter.nextTweetAt,
+  });
+});
+
+router.post('/agent/twitter/disable', (req, res) => {
+  const agent = requireAgent(req, res);
+  if (!agent) return;
+  setTweeting(agent.id, false);
+  res.json({ ok: true, agentId: agent.id, enabled: false });
+});
+
+/** Tweeting status alongside the general credential/dry-run state, without needing /status. */
+router.get('/agent/twitter/status', (req, res) => {
+  const agent = requireAgent(req, res);
+  if (!agent) return;
+  const sched = schedulerInfo(agent.id);
+  res.json({
+    agentId: agent.id,
+    configured: twitterConfigured(),
+    dryRun: twitterDryRun(),
+    ...sched.twitter,
+  });
+});
+
+/**
+ * Demo convenience, parallel to /agent/trigger: tweets the oldest un-promoted post right now
+ * without waiting for the scheduled check. Does not touch next_tweet_at, so the autonomous
+ * loop continues on its own schedule regardless of whether this is ever called.
+ */
+router.post('/agent/twitter/tweet-now', async (req, res) => {
+  const agent = requireAgent(req, res);
+  if (!agent) return;
+
+  // Mirrors /agent/trigger: a paused or stopped agent does nothing autonomous, and a manual
+  // button must not be a backdoor around that — otherwise "stopped" would only stop writing,
+  // not posting, which is not what stopping an agent means.
+  const state = agentState(agent);
+  if (state !== 'active') {
+    return res.status(409).json({
+      error:
+        state === 'stopped'
+          ? `${agent.name} has been stopped and will not tweet.`
+          : `${agent.name} is paused. Resume it before tweeting.`,
+      code: state === 'stopped' ? 'AGENT_STOPPED' : 'AGENT_PAUSED',
+      state,
+    });
+  }
+
+  if (!twitterEnabled(agent)) {
+    return res.status(409).json({
+      error: `Tweeting is not enabled for ${agent.name}. Call /api/agent/twitter/enable first.`,
+      code: 'TWITTER_DISABLED',
+    });
+  }
+  if (isTweeting(agent.id)) {
+    return res.status(409).json({ error: 'A tweet attempt is already in flight for this agent.' });
+  }
+
+  try {
+    const result = await tweetNowGuarded(agent.id);
+    res.json({ ok: true, dryRun: twitterDryRun(), ...result });
+  } catch (err) {
+    console.error('[twitter/tweet-now]', err);
+    res.status(500).json({ error: err.message, code: err.code || 'UNKNOWN' });
+  }
+});
+
+/**
+ * Verifies the four credential values actually authenticate, independent of the posting
+ * path — useful while sorting out account/billing state without spending a tweet to find out.
+ */
+router.get('/twitter/verify', async (_req, res) => {
+  if (!twitterConfigured()) {
+    return res.status(503).json({ error: 'Twitter credentials are not set.', code: 'NO_CREDENTIALS' });
+  }
+  try {
+    const user = await verifyCredentials();
+    res.json({ ok: true, user });
+  } catch (err) {
+    res.status(err.code === 'AUTH_FAILED' ? 401 : 500).json({ error: err.message, code: err.code });
+  }
+});
+
 /* -------------------------------- GET /agents ------------------------------- */
 
 /** Powers the frontend agent switcher; multiple personas run in parallel. */
@@ -253,6 +362,7 @@ router.get('/agents', (_req, res) => {
       createdAt: a.created_at,
       posts: countStats(a.id).accepted,
       state: agentState(a),
+      twitterEnabled: twitterEnabled(a),
     })),
   });
 });
@@ -266,6 +376,8 @@ router.get('/health', (_req, res) => {
     agents: listAgents().length,
     model: getActiveModel(),
     textProvider: getTextProvider(),
+    twitterConfigured: twitterConfigured(),
+    twitterDryRun: twitterDryRun(),
     uptime: process.uptime(),
   });
 });

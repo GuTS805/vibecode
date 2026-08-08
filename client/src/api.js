@@ -30,6 +30,16 @@ export const pauseAgent = lifecycle('pause');
 export const resumeAgent = lifecycle('resume');
 export const stopAgent = lifecycle('stop');
 
+/** X (Twitter) posting: opt-in per agent, independent of the write cycle's own lifecycle. */
+export const enableTwitter = (agentId) =>
+  req(`/api/agent/twitter/enable?agentId=${encodeURIComponent(agentId)}`, { method: 'POST' });
+export const disableTwitter = (agentId) =>
+  req(`/api/agent/twitter/disable?agentId=${encodeURIComponent(agentId)}`, { method: 'POST' });
+export const getTwitterStatus = (agentId) =>
+  req(`/api/agent/twitter/status?agentId=${encodeURIComponent(agentId)}`);
+export const tweetNow = (agentId) =>
+  req(`/api/agent/twitter/tweet-now?agentId=${encodeURIComponent(agentId)}`, { method: 'POST' });
+
 /** "2h ago" style relative timestamps. */
 export function relativeTime(iso) {
   const then = new Date(iso).getTime();

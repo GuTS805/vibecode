@@ -4,6 +4,7 @@ import TopBar from './components/TopBar';
 import Header from './components/Header';
 import Feed from './components/Feed';
 import StatusPanel from './components/StatusPanel';
+import TwitterPanel from './components/TwitterPanel';
 import RejectionsPanel from './components/RejectionsPanel';
 import PersonaPanel from './components/PersonaPanel';
 import InitForm from './components/InitForm';
@@ -51,6 +52,7 @@ export default function App() {
   const [showInit, setShowInit] = useState(false);
   const [busy, setBusy] = useState(false);
   const [lifecycleBusy, setLifecycleBusy] = useState(false);
+  const [twitterBusy, setTwitterBusy] = useState(false);
   const [stage, setStage] = useState(null);
   const [toast, setToast] = useState(null);
   const [theme, toggleTheme] = useTheme();
@@ -247,6 +249,38 @@ export default function App() {
     }
   }
 
+  /**
+   * X posting toggle and manual "tweet now". Independent of handleLifecycle: this agent's
+   * write cycle and its promotion to X are separate switches (see scheduler.js), so a
+   * failure or busy-state in one must not block the other.
+   */
+  async function handleTwitter(action) {
+    if (!activeId || twitterBusy) return;
+    setTwitterBusy(true);
+    try {
+      const fn = { enable: api.enableTwitter, disable: api.disableTwitter, tweetNow: api.tweetNow }[action];
+      const result = await fn(activeId);
+      await loadAgentData(activeId, { silent: true });
+      if (action === 'enable') setToast('Tweeting enabled — the oldest unposted post goes out within a minute.');
+      else if (action === 'disable') setToast('Tweeting disabled.');
+      else if (action === 'tweetNow') {
+        setToast(
+          result.tweeted
+            ? `${result.dryRun ? '[Dry run] ' : ''}Tweeted.`
+            : result.reason === 'nothing-to-tweet'
+              ? 'Nothing to tweet yet — no unposted posts.'
+              : `Could not tweet: ${result.error || result.reason}`
+        );
+      }
+      setTimeout(() => setToast(null), 6000);
+    } catch (err) {
+      setToast(err.message);
+      setTimeout(() => setToast(null), 6000);
+    } finally {
+      setTwitterBusy(false);
+    }
+  }
+
   const activeAgent = agents.find((a) => a.agentId === activeId);
   const agentLifecycle = status?.state || activeAgent?.state || 'active';
   const isActive = agentLifecycle === 'active';
@@ -378,6 +412,14 @@ export default function App() {
 
               <aside className="col-side">
                 <StatusPanel status={status} tick={tick} />
+                <TwitterPanel
+                  twitter={status?.twitter}
+                  onEnable={() => handleTwitter('enable')}
+                  onDisable={() => handleTwitter('disable')}
+                  onTweetNow={() => handleTwitter('tweetNow')}
+                  busy={twitterBusy}
+                  canAct={isActive}
+                />
               </aside>
             </div>
           </>

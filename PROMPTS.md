@@ -649,3 +649,78 @@ still read "its autonomous loop is live" with an enabled "Run a cycle now" butto
 agent, and the Activity panel ignored the state entirely. Both now reflect it. Verified end to
 end in headless Chrome: 14/14 across active → pause → resume → stop, including the confirmation
 dialog and the disabled-trigger states.
+
+---
+
+## 7 — Post to a real X (Twitter) account on an interval (2026-08-08)
+
+**Request:** the agent should be able to handle the user's X account, posting a tweet at a
+set interval, using credentials the user would provide.
+
+**First correction: not credentials, an API app.** The user offered to paste a username and
+password. Declined — driving the web UI with login credentials violates X's Terms of Service,
+risks the account being flagged, and would put a real password in a plaintext `.env` file.
+Walked through creating an X Developer app instead (console.x.com), including the two gotchas
+that catch almost everyone doing this for the first time: App permissions default to
+read-only and must be explicitly set to "Read and write" *before* generating tokens, in that
+order — tokens generated under the old permission stay read-only even after the setting
+changes, so they have to be regenerated afterward, not just the permission changed.
+
+**Credentials authenticated 401, and the cause mattered before writing a line of posting
+code.** `GET /2/users/me` returned `401 Unauthorized` with a textbook-correct OAuth 1.0a
+signature. Rather than assume the code was wrong, isolated the variables one at a time:
+checked the four credential values for invisible/non-ASCII characters from copy-paste (none),
+compared the sandbox clock against X's own `Date` response header in case of timestamp drift
+(they matched, so not that), then tested the *simplest possible* OAuth 1.0a call —
+`POST oauth/request_token` with only the consumer key/secret, no access token involved at
+all — which failed identically. That result is diagnostic: it rules out a signature bug or an
+access-token mismatch, since neither participates in that call, and points at the account or
+project itself. Correlated with what the console had already shown: a "Pay Per Use" plan and a
+`$0.00` balance. Conclusion: X's newer billing can reject even nominally-free calls with a bare
+401 when a project has no payment method on file — a billing gate wearing an auth error's
+clothes. Presented this finding and three options; the user chose to have the integration built
+now, in dry-run, and sort billing separately.
+
+**Built as an opt-in per agent, not a global switch.** One X account, several personas — tweeting
+everything by default would be a mess of unrelated voices on one timeline. `POST
+/api/agent/twitter/enable` turns it on per agent.
+
+**Tweeting is a separate scheduler from the write cycle, not "tweet every post as it
+publishes."** A cycle that publishes two posts should not tweet both back to back — spam on a
+timeline in a way it is not in a scrolling feed. `scheduler.js` gives tweeting its own due-time
+column and its own cadence (`TWEET_MIN_HOURS`–`TWEET_MAX_HOURS`, default 3–5h), and always
+promotes the *oldest* un-tweeted post rather than the newest, so a burst reaches the timeline in
+publication order instead of the newest jumping the queue.
+
+**Composed from the takeaway, not the post.** A tweet is a pointer to the post, not the post
+itself. `composeTweet()` uses the takeaway field that already exists for exactly this, plus the
+first source link — with the link's space reserved first (X always counts a URL as 23
+characters via t.co, regardless of its real length) and the takeaway trimmed to what is left on
+a word boundary.
+
+**Dry run is the default, not a caution for its own sake.** Given the confirmed billing gate,
+`TWITTER_DRY_RUN=true` composes and logs exactly what would be posted and records it against the
+post — same DB shape, `dryRun: true` — without calling the network. This is what let the entire
+pipeline (composition, independent scheduling, per-post recording, the enable/disable UI) be
+built and verified end to end despite the account being unable to post for real right now, and
+it flips to live with one env var once billing is sorted.
+
+**Failure handling had to distinguish whose failure it is.** A rejection tied to a specific post
+(X refuses it as duplicate content) is recorded against that post and the queue moves on — retrying
+it forever would never succeed. A rejection tied to the account (bad credentials, a billing gate,
+a rate limit) has nothing to do with which post was picked, so the post is left untouched and
+eligible, and only an account-level backoff timer applies. Getting this wrong would have meant a
+billing problem burning through the whole queue, marking every post permanently failed for a
+cause none of them caused.
+
+**One real bug, caught by testing the manual endpoint against a stopped agent.** `POST
+/agent/twitter/tweet-now` initially had no lifecycle check and posted successfully from an agent
+whose `state` was `stopped` — inconsistent with `/agent/trigger`, which correctly refuses that.
+Fixed to mirror it: a stopped or paused agent does nothing autonomous, and a manual button must
+not be a backdoor around that, or "stopped" would only mean "stopped writing."
+
+Verified end to end in dry-run: enable/disable, oldest-first queueing across two unposted posts,
+empty-queue handling, the lifecycle guard (409 on a stopped agent, confirmed via direct DB
+inspection that the *test* — not the code — had accidentally left an agent's autonomy window
+closed), and 8/8 checks in headless Chrome covering the panel, the dry-run notice, the tweet
+badges on post cards, and the enable/disable toggle round-trip.
