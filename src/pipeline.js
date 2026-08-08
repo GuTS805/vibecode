@@ -148,6 +148,34 @@ Return ONLY JSON in exactly this shape:
 }`;
 }
 
+const STANDARDS = ['beatFit', 'substance', 'novelty', 'credibility', 'timeliness'];
+
+/**
+ * Put the judge's scores on the 0-100 scale the thresholds assume.
+ *
+ * The prompt asks for 0-100, and Gemini obliges. Groq's models frequently answer on a 0-10
+ * scale instead — a verdict of `overall: 8` meaning "excellent" would be read as 8/100 and
+ * rejected, silently turning every cycle into a shutout that looks like strict editing.
+ * Detected by shape rather than by provider: if every score present is <= 10 and at least
+ * one is non-zero, the whole set is an order of magnitude out and gets scaled.
+ */
+function normalizeScores(data) {
+  const scores = { ...(data?.scores || {}) };
+  const rawOverall = Number.isFinite(data?.overall) ? data.overall : 0;
+
+  const present = [...STANDARDS.map((k) => Number(scores[k])), rawOverall].filter(Number.isFinite);
+  const nonZero = present.filter((v) => v > 0);
+  const tenPointScale = nonZero.length > 0 && present.every((v) => v <= 10);
+
+  if (!tenPointScale) return { scores, overall: rawOverall };
+
+  console.warn('[judge] scores returned on a 0-10 scale; rescaling to 0-100');
+  for (const k of STANDARDS) {
+    if (Number.isFinite(Number(scores[k]))) scores[k] = Number(scores[k]) * 10;
+  }
+  return { scores, overall: rawOverall * 10 };
+}
+
 async function judgeCandidate(persona, candidate, memory) {
   const { data } = await withRetry(
     () =>
@@ -161,15 +189,12 @@ async function judgeCandidate(persona, candidate, memory) {
     { attempts: 2, label: `judge ${candidate.key}` }
   );
 
-  const scores = data?.scores || {};
-  const overall = Number.isFinite(data?.overall) ? data.overall : 0;
+  const { scores, overall } = normalizeScores(data);
   const modelSaysPublish = String(data?.decision).toLowerCase() === 'publish';
 
   // The thresholds are enforced here rather than trusted from the model, so a verdict
   // of "publish" attached to a failing score cannot slip through.
-  const values = ['beatFit', 'substance', 'novelty', 'credibility', 'timeliness'].map(
-    (k) => Number(scores[k]) || 0
-  );
+  const values = STANDARDS.map((k) => Number(scores[k]) || 0);
   const meetsBar = overall >= SCORE_THRESHOLD && values.every((v) => v >= 40);
 
   return {
@@ -229,7 +254,7 @@ Return ONLY JSON in exactly this shape, with no prose before or after:
 {
   "text": "<the post itself, plain prose, no title, no sign-off, no surrounding quotes>",
   "takeaway": "<ONE sentence, under 110 characters: the single thing a reader should remember. Not a summary of the post — the point of it. No lead-in like 'The takeaway is'.>",
-  "imagePrompt": "<A visual description for an abstract editorial illustration to sit above this post. Describe shapes, composition, lighting, and a colour palette that suits the subject's mood. It must be ABSTRACT and CONCEPTUAL — absolutely no text, letters, numbers, words, logos, brand marks, faces, or recognisable people, because the image generator renders those as garbled artefacts. Think magazine cover art, not a diagram. 20-35 words.>"
+  "imagePrompt": "<A visual description for the illustration above this post. It must DEPICT THE SUBJECT OF THIS SPECIFIC STORY — name the concrete objects and systems actually involved (an inbox, a server rack, a padlock, a browser window, a chip, a pipeline, a document leaving a building) and show what is happening to them. A reader who saw only the picture should be able to guess the topic. Do NOT return generic abstract art: no unexplained floating shapes, no vague 'digital background', no glowing orbs — those illustrate nothing. Describe the scene, its lighting, and a colour palette suited to the mood. Name ONE to THREE concrete objects that embody this story and show what is happening between them, framed as a tight close-up where those objects fill the frame. Do not describe a room or a wide environment — a wide shot renders as an empty room and illustrates nothing. Write PURELY POSITIVE description: the generator has no negative-prompt support, so 'no text' or 'without people' makes it render text and people. State only what IS there, never what is absent, and give objects blank unmarked surfaces rather than saying they are unlabelled. CHOOSE OBJECTS THAT DO NOT CARRY WRITING IN REAL LIFE. Cables, locks and latches, chains, circuit boards, silicon wafers, pipes and valves, gears and mechanisms, keys, glass panels, liquid, smoke, light beams, folded metal — these render cleanly. Anything that carries writing in reality will be rendered covered in garbled fake lettering: documents, paper, files, cards, labels, signs, doors, screens, monitors, packaging, boxes, books, dials, keyboards. Build the picture only from the first group — if the story is about a document leaking, draw the cables and the broken lock, not the document. Good: 'a bundle of cables tearing free of a sealed metal housing, one strand glowing hot'. Bad: 'a document slipping out of a server' or 'an office with no people'. 20-35 words.>"
 }`;
 }
 
@@ -299,19 +324,80 @@ export async function writePost(persona, candidate, verdict, memory, format) {
 
 /* ---------------------------------- artwork ----------------------------------- */
 
-/** Style contract applied to every image, so a feed of posts looks like one publication. */
+/**
+ * Style contract applied to every image, so a feed of posts looks like one publication.
+ *
+ * Two hard-won constraints are encoded here.
+ *
+ * First, it is deliberately not "abstract". Asking for abstraction produced glowing orbs and
+ * floating polygons that illustrated nothing; this asks for a depicted scene instead.
+ *
+ * Second — and this is the non-obvious one — it contains no negations. Pollinations' URL API
+ * has no separate negative-prompt field, so "no faces, no people" lands in the *positive*
+ * prompt and summons exactly what it was meant to exclude. Verified: a brief ending in
+ * "no faces, no people" returned a portrait of a person staring into the camera. Absence is
+ * therefore expressed positively — "deserted", "objects only", "still life" — which the
+ * generator can actually act on.
+ */
 const IMAGE_STYLE =
-  'abstract editorial illustration, conceptual, cinematic lighting, dark background, ' +
-  'high contrast, minimal composition, subtle grain, no text, no words, no letters, ' +
-  'no logos, no watermark, no faces, no people';
+  'editorial illustration, tight close-up still life, the objects fill the frame and are the ' +
+  'entire subject, centred symmetrical composition, dramatic studio side lighting, dark moody ' +
+  'background, high contrast, subtle film grain, smooth featureless unmarked surfaces';
 
 /**
- * Fallback brief for when the model returned no usable imagePrompt. Derived from the tag
- * and beat so it still relates to the post rather than being generic filler.
+ * Strip negations from a brief before it reaches the generator.
+ *
+ * The writing model is told not to use them, but instruction-following here is unreliable
+ * and the cost of one leaking through is an image containing the very thing it forbade. This
+ * is the deterministic backstop.
  */
-function fallbackImagePrompt(candidate, verdict, persona) {
-  const subject = verdict.tag || persona.domain;
-  return `abstract representation of ${subject}, interlocking geometric forms, flowing data currents, deep blue and cyan light`;
+export function stripNegations(brief) {
+  return String(brief)
+    // "no text", "no brand logos", "without any labels", "avoid faces"
+    .replace(/\b(?:with)?\s*no\s+[a-z][a-z-]*(?:\s+[a-z][a-z-]*){0,2}\b/gi, ' ')
+    .replace(/\bwithout\s+(?:any\s+)?[a-z][a-z-]*(?:\s+[a-z][a-z-]*){0,2}\b/gi, ' ')
+    .replace(/\bavoid(?:ing)?\s+[a-z][a-z-]*(?:\s+[a-z][a-z-]*){0,2}\b/gi, ' ')
+    // "not a diagram", "never showing text"
+    .replace(/\b(?:not|never)\s+[a-z][a-z-]*(?:\s+[a-z][a-z-]*){0,2}\b/gi, ' ')
+    .replace(/\s*,\s*,+/g, ',')
+    .replace(/\s+/g, ' ')
+    .replace(/^[\s,.;]+|[\s,.;]+$/g, '')
+    .trim();
+}
+
+/** Words that carry no visual meaning and would only dilute the subject anchor. */
+const ANCHOR_STOPWORDS = new Set([
+  'the', 'and', 'for', 'with', 'from', 'that', 'this', 'into', 'over', 'after', 'says',
+  'said', 'can', 'was', 'were', 'has', 'have', 'been', 'its', 'their', 'new', 'how', 'why',
+  'what', 'when', 'more', 'than', 'out', 'via', 'about', 'could', 'would', 'will', 'may',
+]);
+
+/**
+ * A short subject anchor taken from the story itself.
+ *
+ * The model's brief is the main driver, but briefs drift generic — and a generic brief
+ * produces artwork that could sit above any post, which is worse than no artwork. Appending
+ * the story's own significant nouns and its editorial tag keeps the generator pulled toward
+ * this specific subject even when the brief is vague.
+ */
+function subjectAnchor(candidate, verdict) {
+  const words = String(candidate.title)
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .split(/\s+/)
+    .filter((w) => w.length > 3 && !ANCHOR_STOPWORDS.has(w))
+    .slice(0, 6);
+
+  const tag = verdict.tag ? verdict.tag.toLowerCase() : '';
+  return [tag, ...words].filter(Boolean).join(' ');
+}
+
+/**
+ * Fallback brief for when the model returned no usable imagePrompt. Built from the story's
+ * own subject rather than from the beat, so it still illustrates this post specifically.
+ */
+function fallbackImagePrompt(candidate, verdict) {
+  return `a scene representing ${subjectAnchor(candidate, verdict)}, physical objects and systems shown clearly, dramatic side lighting`;
 }
 
 /**
@@ -321,8 +407,10 @@ function fallbackImagePrompt(candidate, verdict, persona) {
 export async function attachImage(candidate, verdict, persona, draft) {
   if (!IMAGES_ENABLED) return { imageUrl: null, imagePrompt: null };
 
-  const brief = draft.imagePrompt || fallbackImagePrompt(candidate, verdict, persona);
-  const full = `${brief}. ${IMAGE_STYLE}`;
+  const brief = stripNegations(draft.imagePrompt || '') || fallbackImagePrompt(candidate, verdict);
+  // Subject anchor first: the generator weights the opening of a prompt most heavily, so
+  // leading with what the story is about is what keeps the artwork tied to this post.
+  const full = `${subjectAnchor(candidate, verdict)}. ${brief}. ${IMAGE_STYLE}`;
 
   try {
     // Seed from the story key so the same post always resolves to the same artwork.

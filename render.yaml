@@ -19,7 +19,14 @@ services:
     autoDeploy: true
 
     envVars:
-      # sync:false = Render prompts for this in the dashboard and never stores it in git.
+      # sync:false = Render prompts for these in the dashboard and never stores them in git.
+      # GROQ is the default text provider: its free tier is measured per minute at high
+      # volume rather than ~20 requests per model per day, which is what previously forced
+      # cadence stretching just to publish a few posts. Get one at console.groq.com/keys.
+      - key: GROQ_API_KEY
+        sync: false
+      # Optional. Only needed if you set TEXT_PROVIDER=gemini, which also enables grounded
+      # (Google Search) discovery; otherwise discovery runs from RSS/HN feeds.
       - key: GEMINI_API_KEY
         sync: false
       # better-sqlite3 is a native module; pinning Node avoids an ABI mismatch between
@@ -49,3 +56,6 @@ services:
 #   envVars:
 #     - key: DATA_DIR
 #       value: /var/data
+
+# Post artwork needs no key at all — Pollinations.ai image generation is free and
+# unauthenticated. Set POST_IMAGES=false to publish text-only.

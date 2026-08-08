@@ -547,3 +547,62 @@ loaded at their natural size rather than merely present in the DOM.
 
 Also surfaced during this work: `gemini-2.5-flash` has since become unavailable on this key
 and the fallback chain correctly dropped it mid-run and continued on `gemini-3.5-flash`.
+
+---
+
+## 5 — Groq for text, and make the artwork relevant (2026-08-08)
+
+**Request:** switch text generation from Gemini to Groq using a supplied key, and fix the
+Pollinations images, which were irrelevant to the posts they sat above.
+
+### Groq
+
+Straightforward and a clear win. Gemini's free tier meters ~20 requests per model per day,
+which is what had forced a six-model fallback chain used as a capacity strategy, a daily-call
+budget in the scheduler, and cadence stretching. Groq's free tier is per-minute at far higher
+volume and roughly 20x faster per call. Measured on the same cycle and candidates: **14
+seconds end to end, down from 123.**
+
+`openai/gpt-oss-120b` was made primary over `llama-3.3-70b-versatile` on measured quality, not
+size — tested against the same fixed candidate, llama returned a 35-word draft that failed the
+length lint and the takeaway *"New browser introduces new risks"*, while gpt-oss-120b cleared
+the voice check first pass with *"Runtime sandboxes add a layer, but they don't replace
+model-level defenses."* A failed lint costs a regeneration call, so the better model is cheaper.
+
+`groq/compound` advertises built-in web search, which would have restored grounded discovery,
+but it rejects even a minimal request with `request_too_large` on this key. Discovery stays on
+feeds.
+
+**One non-obvious bug this surfaced.** Groq's models return the judge's scores on a 0-10 scale
+where the prompt asks for 0-100 — a verdict of `overall: 8` meaning "excellent" would be read
+as 8/100 and rejected. Left alone, every cycle would have become a shutout that looked exactly
+like strict editing rather than a scale bug. `normalizeScores()` now detects it by shape (all
+scores present and <= 10, at least one non-zero) rather than by provider, so it also protects
+against any future model doing the same.
+
+### Making the artwork relevant
+
+The images were handsome and meaningless — a glowing orb above a story on patch triage. Three
+distinct causes, found by generating and *looking at* real output rather than reasoning about
+the prompt:
+
+**Asking for "abstract" guaranteed irrelevance.** The brief demanded abstract conceptual
+imagery, which is an instruction to discard the subject. It now asks for a depicted scene
+naming concrete objects, with the story's own nouns and tag prepended as a subject anchor.
+
+**Negations were summoning what they forbade.** Pollinations' URL API has no negative-prompt
+field, so "no faces, no people" lands in the positive prompt. A brief ending in exactly that
+returned a portrait of a person staring into the camera. Every constraint is now phrased
+positively, and `stripNegations()` deterministically removes any "no X" / "without X" /
+"avoid X" clause the writing model leaks through.
+
+**Some objects attract text and some do not.** A "steel gate" produced a glowing sign covered
+in garbled lettering, centred where the bottom crop cannot reach. Signs, doors, screens,
+packaging, dials, and keyboards render with fake writing; cables, locks, circuit boards,
+wafers, chains, and mechanisms render cleanly. The brief now steers object choice rather than
+adding another negation.
+
+An intermediate attempt overcorrected into "a deserted room" and produced a literal empty
+office with the subject absent, so the style contract now specifies a tight close-up where the
+objects fill the frame. Verified across three unrelated story types — export controls, supply
+chain, patch management — rather than on the single example that motivated the fix.

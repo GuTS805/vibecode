@@ -499,8 +499,34 @@ different economics.
 
 | | Provider | Cost | Notes |
 |---|---|---|---|
+| **Judging & writing** | **Groq** (`openai/gpt-oss-120b`) | Free tier, per-minute limits | Default. `TEXT_PROVIDER` selects |
 | **Post artwork** | Pollinations.ai (`sana`) | Free, no key, no signup | Every published post gets a generated hero image |
-| **Judging & writing** | Gemini, or Pollinations when funded | Free tier, small daily quota | Selected by `TEXT_PROVIDER` |
+| *(alternative)* | Gemini | ~20 req/model/day | Only provider with web-search grounding |
+| *(alternative)* | Pollinations text | Needs a funded token | Implemented; activates on `POLLINATIONS_TOKEN` |
+
+### Why Groq is the default
+
+Gemini's free tier meters `GenerateRequestsPerDayPerProjectPerModel` at around **20 requests
+per model per day**. That single number shaped a surprising amount of earlier design: a
+six-model fallback chain used as a capacity strategy rather than as failover, a daily-call
+budget in the scheduler, and cadence stretching so a roster of agents would not exhaust the
+day's quota before lunch.
+
+Groq removes that constraint. Its free tier is measured per minute at far higher volume, and
+responses land in **0.1–0.5s against Gemini's 4–12s**. Measured on the same cycle, same
+candidates: **14 seconds end to end, down from 123**.
+
+`openai/gpt-oss-120b` is primary on measured quality rather than size. Against the same fixed
+candidate, `llama-3.3-70b-versatile` returned a 35-word draft that failed the length lint and
+a takeaway reading *"New browser introduces new risks"*; `gpt-oss-120b` returned 105 words
+first pass, cleared the voice check without regeneration, and produced *"Runtime sandboxes add
+a layer, but they don't replace model-level defenses."* A regeneration costs an extra call, so
+the better model is also the cheaper one.
+
+What Groq does not have is web-search grounding. `groq/compound` advertises built-in search
+but rejects even a minimal request with `request_too_large` on this key, so discovery runs
+through the feed path — which is the more honest source of URLs anyway, since every link comes
+from a real feed response rather than from a model that might compose one.
 
 ### Why images are Pollinations and text is not
 
@@ -548,6 +574,33 @@ placed to distil it than one told about it second-hand.
 
 Artwork is deliberately non-fatal: `attachImage()` never throws, so a failed or slow image
 downgrades the post to text-only instead of losing work the cycle already paid for.
+
+### Making the artwork actually about the post
+
+The first version produced handsome pictures that illustrated nothing — a glowing orb above a
+story on patch triage. Three specific causes, each fixed:
+
+**Asking for "abstract" guaranteed irrelevance.** The brief demanded abstract, conceptual
+imagery, which is a direct instruction to drop the subject. It now asks for a depicted scene
+naming the concrete objects the story is actually about, and the story's own significant nouns
+plus its editorial tag are prepended as a **subject anchor**, because the generator weights the
+opening of a prompt most heavily and model-written briefs drift generic.
+
+**Negations were summoning what they forbade.** Pollinations' URL API has no negative-prompt
+field, so "no faces, no people" lands in the *positive* prompt. A brief ending in exactly that
+returned a portrait of a person staring into the camera. Absence is now expressed positively —
+"still life of objects", "smooth unmarked surfaces" — and `stripNegations()` removes any "no
+X" / "without X" / "avoid X" clause that leaks through, as a deterministic backstop.
+
+**Some objects attract text and some do not.** Asking for a steel gate produced a glowing sign
+covered in garbled lettering, dead centre where cropping cannot reach. Signs, doors, screens,
+packaging, dials, and keyboards all render with fake writing on them; cables, locks, circuit
+boards, wafers, chains, and mechanisms render cleanly. The brief now steers object choice
+toward the second group, which fixed the failure without another negation.
+
+Framing matters too: an early attempt at "a deserted room" produced a literal empty office with
+the subject nowhere in it, so the style contract now specifies a tight close-up where the
+objects fill the frame.
 
 ## Known constraints
 
