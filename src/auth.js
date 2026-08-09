@@ -74,6 +74,92 @@ export async function signUp(email, password) {
 }
 
 /**
+ * Find a user by email across every page of the admin user list.
+ *
+ * GoTrue's `GET /admin/users?email=` does not actually filter — confirmed by direct testing,
+ * not assumed from documentation: querying two different emails against a two-user project
+ * returned the same account both times, always the first one in the list. Paginated (the
+ * default page size is small) so this stays correct once the user count grows past one page,
+ * rather than only working by coincidence while the project is this small.
+ */
+async function findUserByEmail(email) {
+  const base = process.env.SUPABASE_URL;
+  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  const target = email.toLowerCase();
+
+  for (let page = 1; page <= 20; page++) {
+    const body = await fetch(`${base}/auth/v1/admin/users?page=${page}&per_page=200`, {
+      headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}` },
+    })
+      .then((r) => r.json())
+      .catch(() => ({}));
+
+    const users = body.users || [];
+    const match = users.find((u) => u.email?.toLowerCase() === target);
+    if (match) return match;
+    if (users.length < 200) break; // last page
+  }
+  return null;
+}
+
+/**
+ * Sign in, self-healing any unconfirmed account first.
+ *
+ * Signup goes through `signUp()` above and always produces a confirmed account — but that
+ * only covers accounts created *after* this fix shipped. An account created earlier through
+ * the direct `supabase.auth.signUp()` call (including from a browser tab that had the old
+ * frontend bundle loaded before a rebuild — verified as the actual cause of one real case)
+ * is stuck exactly the way this was built to prevent: it exists, the password is right, and
+ * Supabase refuses to sign it in with `email_confirmed_at` still null.
+ *
+ * Rather than patch each stuck account by hand again, sign-in itself repairs this: look the
+ * account up, confirm it if it is not already, then attempt the password grant. This makes
+ * every sign-in path converge on "confirmation status can never block you," regardless of how
+ * or when the account was created — the actual ask, not just a fix for the one account hit
+ * this time.
+ */
+export async function signIn(email, password) {
+  const base = process.env.SUPABASE_URL;
+  const serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
+  // `?email=` on this endpoint is not a real filter — verified directly, the hard way: it
+  // silently ignores the query param and returns page 1 of every user in the project, so an
+  // earlier version of this lookup was confirming whichever account happened to be listed
+  // first rather than the one actually signing in. Filtering client-side over the full user
+  // list is the correct fix, and entirely fine at this app's scale.
+  const existing = await findUserByEmail(email);
+  if (existing && !existing.email_confirmed_at) {
+    await fetch(`${base}/auth/v1/admin/users/${existing.id}`, {
+      method: 'PUT',
+      headers: { apikey: serviceKey, Authorization: `Bearer ${serviceKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email_confirm: true }),
+    });
+    console.log(`[auth] self-healed unconfirmed account on sign-in: ${email}`);
+  }
+
+  // The password grant accepts any valid project API key, not specifically the anon key, so
+  // the service_role key already held here is reused rather than also plumbing the anon key
+  // into the backend's environment for this one call — verified directly, not assumed.
+  const res = await fetch(`${base}/auth/v1/token?grant_type=password`, {
+    method: 'POST',
+    headers: { apikey: serviceKey, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ email, password }),
+  });
+  const body = await res.json().catch(() => ({}));
+
+  if (!res.ok) {
+    const e = new Error(
+      body.error_description || body.msg || 'Invalid email or password.'
+    );
+    e.code = 'INVALID_CREDENTIALS';
+    e.retryable = false;
+    throw e;
+  }
+
+  return { accessToken: body.access_token, refreshToken: body.refresh_token, user: body.user };
+}
+
+/**
  * Express middleware: every /api/agent/* route needs a real, verified user before it does
  * anything, since every one of those routes now reads or writes data scoped to a user_id.
  * Missing config surfaces as 503 (an operator problem — fix the deployment), a missing or

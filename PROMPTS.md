@@ -921,3 +921,49 @@ just after manual linking); a second signup attempt with the same email returns 
 than the previous silent-feeling "check your email"; and a full browser run confirmed no
 email-related UI state appears anywhere in the flow — 3/3. Both throwaway test accounts
 deleted afterward via the Admin API.
+
+---
+
+## 12 — Sign-in self-heals, for any account, permanently (2026-08-09)
+
+**Request:** a different real email hit "Email not confirmed" on sign-in — the previous fix
+only covered the signup path going forward, not an account that had already ended up
+unconfirmed by some other route. Explicit ask: make it work for any email, any time, not
+patch one more account by hand.
+
+**Root cause of the stuck account:** a browser tab had the frontend bundle loaded from before
+the signup fix shipped, so clicking "Sign up" in that tab still ran the old
+`supabase.auth.signUp()` call directly — genuinely unconfirmed, genuinely stuck, through no
+fault of the new signup code, which was already correct for anything created after the
+rebuild.
+
+**The fix moves sign-in server-side too**, not just signup. `POST /api/auth/signin`
+(`signIn()` in `src/auth.js`) looks the account up, confirms it if it is not already, and only
+then attempts the password grant — so confirmation status can never be the reason someone is
+locked out, regardless of which code path created the account or when. The frontend installs
+the returned session with `supabase.auth.setSession()` rather than calling
+`signInWithPassword()` directly, so this is now the only sign-in path in the app, not an
+alternate one.
+
+**A real bug in the fix itself, caught by testing two accounts instead of one.** The lookup
+used `GET /admin/users?email=` as a filter. It is not one — verified directly, not assumed:
+querying two different addresses against a two-user project returned the *same* account both
+times, always whichever user the endpoint lists first. The first version of this fix "worked"
+purely by coincidence, because the one real account being tested against happened to be first
+in the list; a second stuck account with any other email would have had the *first* account's
+confirmation checked and the *second* account's password validated against Supabase's normal
+(still-unconfirmed, still-blocked) path — as broken as before, just less visibly. Testing
+against a lone known-good account could never have surfaced this; it only showed up once a
+second, independent account existed to disagree with the first. `findUserByEmail()` now
+paginates the full user list and filters client-side instead of trusting an unsupported query
+param.
+
+Verified with the actual failure mode reproduced deliberately, not just the fixed path
+exercised: two accounts created unconfirmed via the admin API (`email_confirm: false`,
+bypassing signup entirely so the test does not depend on Supabase's rate limit), each with a
+different password. Both signed in successfully through the real API and each authenticated
+against its *own* credentials, not each other's — proving the per-account correctness, not
+just that confirmation got bypassed somehow. Re-ran the identical scenario through a real
+headless-Chrome sign-in (not just the API) for a third such account: 2/2. The original stuck
+account and the known-good account were both confirmed intact and working afterward, and every
+disposable test account was deleted.

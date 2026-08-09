@@ -31,33 +31,45 @@ export default function Auth() {
     );
   }
 
+  /**
+   * Both call the backend rather than the Supabase client directly.
+   *
+   * Signup: `supabase.auth.signUp()` needs a confirmed inbox before it issues a session, and
+   * free-tier Supabase rate-limits its own confirmation-email sender tightly enough that real
+   * signups failed outright while building this. `/api/auth/signup` creates the account
+   * already confirmed.
+   *
+   * Sign-in: routed through the backend too, so it can self-heal an account that ended up
+   * unconfirmed for any reason — including one created by a browser tab that still had an
+   * older frontend bundle loaded from before the signup fix above existed. See `signIn()` in
+   * `src/auth.js`. The backend hands back a real Supabase session pair, installed here with
+   * `setSession()` so everything downstream behaves exactly as if `signInWithPassword()` had
+   * been called directly.
+   */
+  async function backendAuth(path, body) {
+    const res = await fetch(path, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) throw new Error(data.error || `Request failed (${res.status})`);
+    return data;
+  }
+
   async function submit(e) {
     e.preventDefault();
     setBusy(true);
     setError(null);
     try {
       if (mode === 'signup') {
-        // Routed through the backend rather than supabase.auth.signUp() directly: that call
-        // needs a confirmed inbox before it issues a session, and free-tier Supabase
-        // rate-limits its own confirmation-email sender tightly enough that real signups
-        // failed outright while building this. /api/auth/signup creates the account already
-        // confirmed, so signing in immediately after works with no email step at all.
-        const res = await fetch('/api/auth/signup', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ email, password }),
-        });
-        const body = await res.json().catch(() => ({}));
-        if (!res.ok) throw new Error(body.error || `Sign-up failed (${res.status})`);
-
-        const { error } = await supabase.auth.signInWithPassword({ email, password });
-        if (error) throw error;
-        // No further action needed — App.jsx's onAuthStateChange listener picks up the new
-        // session and swaps this form out for the dashboard.
-      } else {
-        const { error } = await supabase.auth.signInWithPassword({ email, password });
-        if (error) throw error;
+        await backendAuth('/api/auth/signup', { email, password });
       }
+      const { accessToken, refreshToken } = await backendAuth('/api/auth/signin', { email, password });
+      const { error } = await supabase.auth.setSession({ access_token: accessToken, refresh_token: refreshToken });
+      if (error) throw error;
+      // No further action needed — App.jsx's onAuthStateChange listener picks up the new
+      // session and swaps this form out for the dashboard.
     } catch (err) {
       setError(err.message);
     } finally {

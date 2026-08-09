@@ -12,7 +12,7 @@ import {
 import { getActiveModel, getTextProvider } from './llm.js';
 import { isConfigured as twitterConfigured, isDryRun as twitterDryRun, verifyCredentials as verifyTwitter } from './twitter.js';
 import { isConfigured as blueskyConfigured, isDryRun as blueskyDryRun, verifyCredentials as verifyBluesky } from './bluesky.js';
-import { requireAuth, signUp } from './auth.js';
+import { requireAuth, signUp, signIn } from './auth.js';
 
 export const router = Router();
 
@@ -64,6 +64,31 @@ router.post('/auth/signup', async (req, res) => {
       return res.status(503).json({ error: err.message, code: err.code });
     }
     res.status(err.code === 'EMAIL_TAKEN' ? 409 : 500).json({ error: err.message, code: err.code });
+  }
+});
+
+/**
+ * Sign-in, also routed server-side. Unlike signup, this is not about avoiding an email step —
+ * it exists so sign-in itself repairs an account stuck unconfirmed for any reason (see
+ * `signIn()` in auth.js for the concrete case that motivated it: a browser tab holding an old
+ * frontend bundle from before the signup fix). The frontend gets back a real Supabase session
+ * pair and installs it with `supabase.auth.setSession()`, so everything downstream — the
+ * `onAuthStateChange` listener, token refresh — behaves exactly as if
+ * `supabase.auth.signInWithPassword()` had been called directly.
+ */
+router.post('/auth/signin', async (req, res) => {
+  const email = String(req.body?.email || '').trim();
+  const password = String(req.body?.password || '');
+  if (!email || !password) return bad(res, 'email and password are both required');
+
+  try {
+    const { accessToken, refreshToken } = await signIn(email, password);
+    res.json({ ok: true, accessToken, refreshToken });
+  } catch (err) {
+    if (err.code === 'AUTH_NOT_CONFIGURED') {
+      return res.status(503).json({ error: err.message, code: err.code });
+    }
+    res.status(err.code === 'INVALID_CREDENTIALS' ? 401 : 500).json({ error: err.message, code: err.code });
   }
 });
 

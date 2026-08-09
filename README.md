@@ -349,28 +349,33 @@ called, and the 48-hour requirement is satisfied entirely by that loop.
 
 All responses are JSON. The first two are the required surface; the rest are for inspection.
 
-Every route except `/api/health`, `/api/personas`, and `/api/auth/signup` requires
+Every route except `/api/health`, `/api/personas`, `/api/auth/signup`, and `/api/auth/signin` requires
 `Authorization: Bearer <token>`, a Supabase session access token — see
 [Multi-user auth](#multi-user-auth). The curl examples below omit it for brevity; get one by
 signing in through the app and reading it from `localStorage` in devtools, or via
 `supabase.auth.getSession()` in the browser console.
 
-### `POST /api/auth/signup`
+### `POST /api/auth/signup` · `POST /api/auth/signin`
 
-Creates an account, already confirmed — see [Multi-user auth](#multi-user-auth) for why this
-exists instead of calling `supabase.auth.signUp()` from the frontend. Sign in immediately
-afterward with `supabase.auth.signInWithPassword()`; this endpoint only creates the account.
+Creates an account, already confirmed, and signs in — see
+[Multi-user auth](#multi-user-auth) for why both are routed through the backend rather than
+`supabase.auth.signUp()` / `signInWithPassword()` directly. Signup only creates the account;
+call `/auth/signin` afterward (the frontend does both automatically). Sign-in additionally
+self-heals any account stuck unconfirmed, whatever the cause.
 
 ```bash
 curl -X POST localhost:3000/api/auth/signup -H 'Content-Type: application/json' \
   -d '{"email":"you@example.com","password":"at least 6 characters"}'
+# { "ok": true, "userId": "0555340a-...", "email": "you@example.com" }
+
+curl -X POST localhost:3000/api/auth/signin -H 'Content-Type: application/json' \
+  -d '{"email":"you@example.com","password":"at least 6 characters"}'
+# { "ok": true, "accessToken": "eyJ...", "refreshToken": "..." }
 ```
 
-```json
-{ "ok": true, "userId": "0555340a-...", "email": "you@example.com" }
-```
-
-`409` with `code: EMAIL_TAKEN` if the address is already registered.
+`/signup` returns `409 EMAIL_TAKEN` if the address is already registered. `/signin` returns
+`401 INVALID_CREDENTIALS` for a wrong password — that check still applies in full; self-healing
+only removes confirmation status as a reason to be blocked, never the password itself.
 
 ### `POST /api/agent/init`
 
@@ -866,24 +871,42 @@ emails go through Supabase's own shared sender on the free tier, capped low. The
 a one-off admin-API workaround for a single account; the real fix, described next, made it
 permanent for every signup rather than something that needed redoing per user.
 
-### Signup goes through the backend, not `supabase.auth.signUp()`
+### Both signup and sign-in go through the backend
 
-The frontend's sign-up form does not call Supabase directly. It posts to
-`POST /api/auth/signup` (`src/routes.js`), which calls `auth.admin.createUser({ email_confirm:
-true })` (`src/auth.js`) — the same admin-API call used for the one-off fix above, now the
-actual signup path. The account is created already confirmed; the frontend then calls
-`supabase.auth.signInWithPassword()` immediately after, establishing a session with no email
-step at all, ever, for anyone.
+Neither calls the Supabase client's auth methods directly from the browser.
 
-This is a deliberate trade, not an oversight: the normal flow proves the signer-upper controls
-the inbox they typed, which this app does not need — it is not a public service where that
-matters, and every account is isolated from every other one by `user_id` regardless of how it
-was created. Skipping it also means the free-tier rate limit that blocked real signups during
-development is permanently out of the picture, not something to hit again with the next new
-user. `POST /api/auth/signup` is intentionally public (mounted ahead of `requireAuth` in
-`routes.js`) — signing up is how someone becomes authenticated, so it cannot itself require
-being authenticated already — and duplicate emails are rejected with `409 EMAIL_TAKEN` rather
-than Supabase's own ambiguous anti-enumeration response.
+`POST /api/auth/signup` (`src/routes.js` → `signUp()` in `src/auth.js`) calls
+`auth.admin.createUser({ email_confirm: true })` — the account is created already confirmed,
+so no email step exists at all, ever, for anyone. This is a deliberate trade, not an
+oversight: the normal flow proves the signer-upper controls the inbox they typed, which this
+app does not need — it is not a public service where that matters, and every account is
+isolated from every other one by `user_id` regardless of how it was created. It also means the
+free-tier email rate limit that blocked real signups during development never comes up again.
+Duplicate emails get a plain `409 EMAIL_TAKEN`.
+
+`POST /api/auth/signin` (`signIn()` in `src/auth.js`) exists for a narrower reason: it
+**self-heals** an account stuck unconfirmed for any cause other than the normal signup path
+above — concretely, an account created by a browser tab that still had an older frontend
+bundle loaded from before the signup fix shipped, which called `supabase.auth.signUp()`
+directly and left the account genuinely unconfirmed. Sign-in looks the account up, confirms it
+if it is not already, and only then attempts the password grant — so confirmation status can
+never be the reason someone is locked out, independent of how their account came to exist. The
+backend returns the raw session pair (`accessToken`/`refreshToken`); the frontend installs it
+with `supabase.auth.setSession()` rather than calling `signInWithPassword()` itself, so the
+behaviour downstream — `onAuthStateChange`, token refresh — is identical either way.
+
+Both routes are intentionally public (mounted ahead of `requireAuth` in `routes.js`): becoming
+authenticated cannot itself require already being authenticated.
+
+**The email lookup this needed had its own bug, found by testing two accounts, not one.**
+`GET /admin/users?email=` looks like a filter and is not — verified directly: querying two
+different email addresses against a two-user project returned the same account both times,
+always whichever user the endpoint lists first. An earlier version of `signIn()` used this
+query param directly, which meant it was silently confirming (and evaluating credentials
+against) whatever account happened to be first in the project rather than the one actually
+signing in — a real correctness bug that a single-account test could not have caught, since
+with one user in the project "the first result" and "the right result" are indistinguishable.
+`findUserByEmail()` now paginates the full user list and filters client-side instead.
 
 ### Migrating agents that predate auth
 
