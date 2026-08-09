@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import {
-  createAgent, getAgent, listAgents, getPosts, getRejections, countStats, loadPersona, agentState,
-  twitterEnabled, blueskyEnabled,
+  createAgent, getAgent, listAgents, listAgentsForUser, isOwnedBy, getPosts, getRejections,
+  countStats, loadPersona, agentState, twitterEnabled, blueskyEnabled,
 } from './db.js';
 import { resolvePersona, personaSystemPrompt, listRegistryPersonas } from './persona.js';
 import {
@@ -12,20 +12,52 @@ import {
 import { getActiveModel, getTextProvider } from './llm.js';
 import { isConfigured as twitterConfigured, isDryRun as twitterDryRun, verifyCredentials as verifyTwitter } from './twitter.js';
 import { isConfigured as blueskyConfigured, isDryRun as blueskyDryRun, verifyCredentials as verifyBluesky } from './bluesky.js';
+import { requireAuth } from './auth.js';
 
 export const router = Router();
 
 const bad = (res, msg) => res.status(400).json({ error: msg });
 
-/** Resolves ?agentId= and 404s consistently. */
-function requireAgent(req, res) {
+/* --------------------------------- public --------------------------------- */
+/* Routes above the requireAuth mount below are reachable without signing in — deployment
+   diagnostics and the persona catalogue, neither of which touches any user's data. */
+
+/** The personas defined in persona.json, for anyone wondering what names /init knows. */
+router.get('/personas', (_req, res) => res.json({ personas: listRegistryPersonas() }));
+
+router.get('/health', (_req, res) => {
+  res.json({
+    ok: true,
+    agents: listAgents().length,
+    model: getActiveModel(),
+    textProvider: getTextProvider(),
+    twitterConfigured: twitterConfigured(),
+    twitterDryRun: twitterDryRun(),
+    blueskyConfigured: blueskyConfigured(),
+    blueskyDryRun: blueskyDryRun(),
+    uptime: process.uptime(),
+  });
+});
+
+/* ------------------------------ everything else ----------------------------- */
+/* Every route below requires a verified Supabase session. Agents, posts, and rejections are
+   now scoped per user_id, and this is the one gate that makes that scoping mean anything —
+   without it, an unauthenticated caller could still read or drive any agent by guessing an id. */
+router.use(requireAuth);
+
+/**
+ * Resolves ?agentId= to a row this caller actually owns. 404 (not 403) on a mismatch, so the
+ * response to "wrong owner" and "does not exist" look identical — otherwise the endpoint would
+ * confirm which ids are real to a caller who has no business asking.
+ */
+function requireOwnedAgent(req, res) {
   const agentId = req.query.agentId || req.body?.agentId;
   if (!agentId) {
     bad(res, 'agentId is required');
     return null;
   }
   const agent = getAgent(agentId);
-  if (!agent) {
+  if (!agent || !isOwnedBy(agent, req.userId)) {
     res.status(404).json({ error: `No agent with id ${agentId}` });
     return null;
   }
@@ -56,6 +88,7 @@ router.post('/agent/init', (req, res) => {
     personaPrompt: personaSystemPrompt(resolved),
     persona: resolved,
     autonomyHours: AUTONOMY_HOURS,
+    userId: req.userId,
   });
 
   primeFirstCycle(agent.id);
@@ -70,7 +103,7 @@ router.post('/agent/init', (req, res) => {
 /* -------------------------------- GET /feed -------------------------------- */
 
 router.get('/agent/feed', (req, res) => {
-  const agent = requireAgent(req, res);
+  const agent = requireOwnedAgent(req, res);
   if (!agent) return;
   // Newest-first, unique ids, ISO 8601 UTC, read straight from SQLite so history persists
   // across restarts. Published posts are append-only — never mutated or deleted.
@@ -80,7 +113,7 @@ router.get('/agent/feed', (req, res) => {
 /* ------------------------------- GET /status ------------------------------- */
 
 router.get('/agent/status', (req, res) => {
-  const agent = requireAgent(req, res);
+  const agent = requireOwnedAgent(req, res);
   if (!agent) return;
   const stats = countStats(agent.id);
   const sched = schedulerInfo(agent.id);
@@ -121,7 +154,7 @@ router.get('/agent/status', (req, res) => {
 
 /** The full config every prompt is built from — the voice, in inspectable form. */
 router.get('/agent/persona', (req, res) => {
-  const agent = requireAgent(req, res);
+  const agent = requireOwnedAgent(req, res);
   if (!agent) return;
   try {
     res.json({ agentId: agent.id, persona: loadPersona(agent) });
@@ -138,7 +171,7 @@ router.get('/agent/persona', (req, res) => {
  * required API surface does not expose any of this.
  */
 function rejectionsHandler(req, res) {
-  const agent = requireAgent(req, res);
+  const agent = requireOwnedAgent(req, res);
   if (!agent) return;
   const rejections = getRejections(agent.id);
   const stats = countStats(agent.id);
@@ -163,7 +196,7 @@ router.get('/debug/rejected', rejectionsHandler);
  * ever called. See README > Requirement mapping.
  */
 router.post('/agent/trigger', async (req, res) => {
-  const agent = requireAgent(req, res);
+  const agent = requireOwnedAgent(req, res);
   if (!agent) return;
 
   // Pausing has to mean the agent publishes nothing. Letting a manual trigger through would
@@ -223,7 +256,7 @@ router.post('/agent/trigger', async (req, res) => {
  */
 function lifecycleHandler(state) {
   return (req, res) => {
-    const agent = requireAgent(req, res);
+    const agent = requireOwnedAgent(req, res);
     if (!agent) return;
 
     const current = agentState(agent);
@@ -265,7 +298,7 @@ router.post('/agent/stop', lifecycleHandler('stopped'));
  * already has an unpromoted post tweets it promptly instead of hours later.
  */
 router.post('/agent/twitter/enable', (req, res) => {
-  const agent = requireAgent(req, res);
+  const agent = requireOwnedAgent(req, res);
   if (!agent) return;
   setTweeting(agent.id, true);
   res.json({
@@ -279,7 +312,7 @@ router.post('/agent/twitter/enable', (req, res) => {
 });
 
 router.post('/agent/twitter/disable', (req, res) => {
-  const agent = requireAgent(req, res);
+  const agent = requireOwnedAgent(req, res);
   if (!agent) return;
   setTweeting(agent.id, false);
   res.json({ ok: true, agentId: agent.id, enabled: false });
@@ -287,7 +320,7 @@ router.post('/agent/twitter/disable', (req, res) => {
 
 /** Tweeting status alongside the general credential/dry-run state, without needing /status. */
 router.get('/agent/twitter/status', (req, res) => {
-  const agent = requireAgent(req, res);
+  const agent = requireOwnedAgent(req, res);
   if (!agent) return;
   const sched = schedulerInfo(agent.id);
   res.json({
@@ -304,7 +337,7 @@ router.get('/agent/twitter/status', (req, res) => {
  * loop continues on its own schedule regardless of whether this is ever called.
  */
 router.post('/agent/twitter/tweet-now', async (req, res) => {
-  const agent = requireAgent(req, res);
+  const agent = requireOwnedAgent(req, res);
   if (!agent) return;
 
   // Mirrors /agent/trigger: a paused or stopped agent does nothing autonomous, and a manual
@@ -365,7 +398,7 @@ router.get('/twitter/verify', async (_req, res) => {
  * made this worth adding as a genuine alternative rather than only documenting the gate.
  */
 router.post('/agent/bluesky/enable', (req, res) => {
-  const agent = requireAgent(req, res);
+  const agent = requireOwnedAgent(req, res);
   if (!agent) return;
   setSkeeting(agent.id, true);
   res.json({
@@ -379,14 +412,14 @@ router.post('/agent/bluesky/enable', (req, res) => {
 });
 
 router.post('/agent/bluesky/disable', (req, res) => {
-  const agent = requireAgent(req, res);
+  const agent = requireOwnedAgent(req, res);
   if (!agent) return;
   setSkeeting(agent.id, false);
   res.json({ ok: true, agentId: agent.id, enabled: false });
 });
 
 router.get('/agent/bluesky/status', (req, res) => {
-  const agent = requireAgent(req, res);
+  const agent = requireOwnedAgent(req, res);
   if (!agent) return;
   const sched = schedulerInfo(agent.id);
   res.json({
@@ -398,7 +431,7 @@ router.get('/agent/bluesky/status', (req, res) => {
 });
 
 router.post('/agent/bluesky/tweet-now', async (req, res) => {
-  const agent = requireAgent(req, res);
+  const agent = requireOwnedAgent(req, res);
   if (!agent) return;
 
   const state = agentState(agent);
@@ -446,10 +479,14 @@ router.get('/bluesky/verify', async (_req, res) => {
 
 /* -------------------------------- GET /agents ------------------------------- */
 
-/** Powers the frontend agent switcher; multiple personas run in parallel. */
-router.get('/agents', (_req, res) => {
+/**
+ * Powers the frontend agent switcher. Scoped to the caller's own agents only — this is the
+ * second half of what makes multi-user real: it is not enough that other users' agents 404 on
+ * direct access, the roster view must not even list them.
+ */
+router.get('/agents', (req, res) => {
   res.json({
-    agents: listAgents().map((a) => ({
+    agents: listAgentsForUser(req.userId).map((a) => ({
       agentId: a.id,
       name: a.name,
       domain: a.domain,
@@ -459,22 +496,5 @@ router.get('/agents', (_req, res) => {
       twitterEnabled: twitterEnabled(a),
       blueskyEnabled: blueskyEnabled(a),
     })),
-  });
-});
-
-/** The personas defined in persona.json, for anyone wondering what names /init knows. */
-router.get('/personas', (_req, res) => res.json({ personas: listRegistryPersonas() }));
-
-router.get('/health', (_req, res) => {
-  res.json({
-    ok: true,
-    agents: listAgents().length,
-    model: getActiveModel(),
-    textProvider: getTextProvider(),
-    twitterConfigured: twitterConfigured(),
-    twitterDryRun: twitterDryRun(),
-    blueskyConfigured: blueskyConfigured(),
-    blueskyDryRun: blueskyDryRun(),
-    uptime: process.uptime(),
   });
 });

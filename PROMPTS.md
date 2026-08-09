@@ -778,3 +778,75 @@ Verified end to end in dry-run: both networks' enable/disable/status/tweet-now, 
 lifecycle guard on both independently, and a browser check confirming both `SocialPanel`
 instances render side by side with independent state (X off, Bluesky on) and the `🦋` badge
 appears on a post promoted only to Bluesky.
+
+---
+
+## 9 — Multi-user auth with Supabase (2026-08-08/09)
+
+**Request:** add login/signup via Supabase, so the app stops being single-tenant. Clarified
+scope up front, since the two readings differ enormously in implementation size: a single
+admin login gating the whole dashboard, versus real multi-user with each account's agents
+isolated from every other account's. The user chose the latter.
+
+**Why this mattered beyond "nice to have."** The app was already deployed to a public Render
+URL with zero auth — anyone on the internet could init, trigger, pause, or enable social
+posting on any agent, including one actively posting to a real Bluesky account. Auth here
+closes a real hole, not a cosmetic one.
+
+**Supabase for identity only, never as the data store.** Agents, posts, and rejections stay in
+the same SQLite file this project has always used, with one added column:
+`agents.user_id`, the Supabase user's UUID stored as an opaque string. No Supabase table, no
+Row Level Security policy, anywhere. That decision is what kept this a feature addition rather
+than a rewrite — one migration, one ownership check, one middleware.
+
+**Token verification calls Supabase's own `auth.getUser()`** rather than decoding the JWT and
+its signature locally — a deliberate trade of a network round trip per request against writing
+and maintaining JWKS fetching and key rotation by hand, for an app whose load is dashboard
+clicks, not a high-QPS API.
+
+**Ownership is a separate concern from authentication**, and worth stating precisely: being
+signed in proves who you are, `requireOwnedAgent()` proves you may touch *this* agent. It 404s
+rather than 403s on a mismatch, so "belongs to someone else" and "does not exist" are
+indistinguishable — otherwise the endpoint would confirm which agent ids are real to a caller
+with no business asking.
+
+### Two credential problems, neither a code bug — diagnosed by isolating variables, not by guessing again
+
+**The Supabase project URL was mistranscribed from a screenshot.** `lbsnbnumciyqbjbdjro` vs. the
+real `lbsnbnumciyqbjbdjdro` — one extra `d`, invisible at a glance. `curl` returned "Could not
+resolve host," which is diagnostic on its own: a wrong signature or wrong key 401s, a wrong
+hostname does not resolve at all. That distinction is what said "re-copy the URL," not "check the
+auth code," and it was right — the second attempt, copied fresh, resolved immediately.
+
+**Free-tier Supabase rate-limits its own email sender, unrelated to API quota.** Real signup
+through the actual UI failed with `over_email_send_rate_limit`. Went looking for a "disable
+email confirmation" toggle first, in a settings UI that turned out to have been reorganised
+since — wasted a round trip. The actual fix needed no UI setting at all: `POST
+/auth/v1/admin/users` with `email_confirm: true` creates an already-confirmed account and
+sends zero emails, sidestepping the rate limit rather than working around it. Verified the
+account had zero real users before creating one this way, so nothing from the earlier failed
+attempt was left in a half-created state.
+
+### Migrating agents that predate the `user_id` column
+
+Eight existing agents — including "Grace," a persona already autonomously posting real content
+to a live Bluesky account from earlier in this session — had `user_id NULL`. Once auth went
+live, those rows would become invisible to every account (`listAgentsForUser` filters on an
+exact match) while continuing to run unattended: the scheduler's `listAgents()` stayed
+deliberately unscoped, since the cron loop must keep every user's agents ticking regardless of
+who is logged in at any given moment — confirmed directly, not assumed, by checking the boot log
+and Grace's `next_skeet_at` immediately after wiring `requireAuth` in, before any real account
+existed. Losing UI control over an agent still posting to a real external account is a genuine
+problem, so after the real account was created its `user_id` was assigned to all eight rows in
+one pass — continuity kept, nothing re-initialized.
+
+### Verification, not assumption, for the property that actually matters
+
+The point of this feature is isolation, so it was the one thing tested adversarially rather than
+just exercised happy-path. A second, disposable account was created via the Admin API, logged in
+through the real browser UI, and confirmed to see an empty roster — zero agents, not "Grace with
+reduced permissions." Then, at the API layer directly: a request for Grace's `agentId` under the
+second account's token, and a `POST /agent/pause` against the same id, both returned `404`. The
+throwaway account was deleted immediately after. Also verified in headless Chrome for the real
+account: 5/5 — login succeeds, all eight agents appear, Grace specifically visible with her
+published posts, sign-out control present, no console errors.

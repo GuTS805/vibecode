@@ -910,3 +910,54 @@ a { color: var(--accent); }
 .twitter-note-dry { border-color: color-mix(in srgb, var(--warn) 28%, transparent); background: var(--warn-bg); color: var(--warn); }
 
 .twitter-stats { margin: 4px 0 10px; }
+
+/* ---------------------------------- auth gate --------------------------------- */
+
+.auth-boot { min-height: 100vh; }
+
+.auth-shell {
+  min-height: 100vh;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+}
+
+.auth-card {
+  width: 100%;
+  max-width: 380px;
+  padding: 28px 26px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.auth-title { font: 700 22px/1.2 var(--font-display); letter-spacing: -.01em; }
+.auth-sub { margin: 4px 0 18px; }
+
+.auth-field { display: flex; flex-direction: column; gap: 6px; margin-bottom: 14px; }
+.auth-field span {
+  font-size: 11px; color: var(--text-faint); text-transform: uppercase;
+  letter-spacing: .06em; font-weight: 600;
+}
+.auth-field input {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px 12px;
+  color: var(--text);
+  font: 400 14.5px var(--font-body);
+}
+.auth-field input:focus { outline: none; border-color: var(--accent); box-shadow: 0 0 0 3px var(--accent-soft); }
+
+.auth-notice {
+  margin: 0 0 14px;
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 13px;
+}
+
+.auth-submit { width: 100%; justify-content: center; margin-top: 4px; }
+.auth-switch { width: 100%; justify-content: center; margin-top: 10px; font-size: 13px; }

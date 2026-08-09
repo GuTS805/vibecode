@@ -1,11 +1,29 @@
+/**
+ * The current Supabase access token, set by App.jsx whenever the session changes (sign in,
+ * sign out, token refresh). Kept as a plain module-level variable rather than threaded through
+ * every call site — every request in this file needs it, and passing it as a parameter to
+ * three dozen functions would just be ceremony around the same global truth: "who is signed
+ * in right now."
+ */
+let authToken = null;
+export const setAuthToken = (token) => { authToken = token; };
+
 /** Same-origin in production (Express serves this bundle); Vite proxies /api in dev. */
 async function req(path, options = {}) {
   const res = await fetch(path, {
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      ...(authToken ? { Authorization: `Bearer ${authToken}` } : {}),
+    },
     ...options,
   });
   const body = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(body.error || `Request failed (${res.status})`);
+  if (!res.ok) {
+    const err = new Error(body.error || `Request failed (${res.status})`);
+    err.code = body.code;
+    err.status = res.status;
+    throw err;
+  }
   return body;
 }
 

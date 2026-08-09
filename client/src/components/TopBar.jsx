@@ -8,7 +8,7 @@ import { monogram, personaAccent } from '../api';
  * fold; monograms keep the whole roster on one row at any width, and each carries its
  * persona accent so the active agent is identifiable without reading it.
  */
-export default function TopBar({ agents, activeId, onSelect, onNew, theme, onToggleTheme }) {
+export default function TopBar({ agents, activeId, onSelect, onNew, theme, onToggleTheme, userEmail, onSignOut }) {
   return (
     <header className="topbar">
       <div className="topbar-inner">
@@ -60,6 +60,12 @@ export default function TopBar({ agents, activeId, onSelect, onNew, theme, onTog
           >
             <span aria-hidden="true">{theme === 'dark' ? '☀' : '☾'}</span>
           </button>
+          {onSignOut && (
+            <button className="icon-btn" onClick={onSignOut} title={userEmail ? `Sign out (${userEmail})` : 'Sign out'}>
+              <span aria-hidden="true">⎋</span>
+              <span className="sr-only">Sign out</span>
+            </button>
+          )}
         </div>
       </div>
     </header>

@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import * as api from './api';
+import { supabase, authConfigured } from './supabaseClient';
+import Auth from './components/Auth';
 import TopBar from './components/TopBar';
 import Header from './components/Header';
 import Feed from './components/Feed';
@@ -37,7 +39,44 @@ function useTheme() {
   return [theme, () => setTheme((t) => (t === 'dark' ? 'light' : 'dark'))];
 }
 
+/**
+ * Session bootstrap and live sync.
+ *
+ * Every agent now belongs to a user, so nothing in the dashboard can load until we know who is
+ * asking. `getSession()` answers that once, synchronously-ish, from Supabase's local storage
+ * cache (fast — no network round trip for the common case of a returning, already-signed-in
+ * visitor); `onAuthStateChange` then keeps it current for sign-in, sign-out, and the token
+ * refreshes Supabase does automatically in the background. `api.setAuthToken` is updated in
+ * the same callback so every request already carries the right bearer token by the time
+ * anything tries to fetch data — there is no window where a stale or missing token could
+ * cause a flash of 401s.
+ */
+function useSession() {
+  const [session, setSession] = useState(null);
+  const [ready, setReady] = useState(!authConfigured);
+
+  useEffect(() => {
+    if (!authConfigured) return undefined;
+
+    supabase.auth.getSession().then(({ data }) => {
+      setSession(data.session);
+      api.setAuthToken(data.session?.access_token || null);
+      setReady(true);
+    });
+
+    const { data: sub } = supabase.auth.onAuthStateChange((_event, next) => {
+      setSession(next);
+      api.setAuthToken(next?.access_token || null);
+    });
+
+    return () => sub.subscription.unsubscribe();
+  }, []);
+
+  return { session, ready };
+}
+
 export default function App() {
+  const { session, ready } = useSession();
   const [agents, setAgents] = useState([]);
   const [activeId, setActiveId] = useState(null);
   const [posts, setPosts] = useState([]);
@@ -117,8 +156,20 @@ export default function App() {
       .catch(() => setPersona(null));
   }, [activeId]);
 
-  // Boot: load agents, select the first one.
+  // Load this user's agents once a session exists, and reset every piece of per-agent state
+  // on sign-out — otherwise a second account signing in on the same tab would flash the
+  // previous user's cached feed for a moment before the new data arrived.
   useEffect(() => {
+    if (!session) {
+      setAgents([]);
+      setActiveId(null);
+      setPosts([]);
+      setStatus(null);
+      setRejections([]);
+      setShowInit(false);
+      seenIds.current = new Set();
+      return;
+    }
     (async () => {
       try {
         const list = await loadAgents();
@@ -132,7 +183,7 @@ export default function App() {
         setLoading(false);
       }
     })();
-  }, [loadAgents]);
+  }, [session, loadAgents]);
 
   // Switching agents resets the animation baseline.
   useEffect(() => {
@@ -285,6 +336,10 @@ export default function App() {
     }
   }
 
+  const handleSignOut = useCallback(() => {
+    supabase.auth.signOut();
+  }, []);
+
   const activeAgent = agents.find((a) => a.agentId === activeId);
   const agentLifecycle = status?.state || activeAgent?.state || 'active';
   const isActive = agentLifecycle === 'active';
@@ -301,6 +356,12 @@ export default function App() {
 
   /* --------------------------------- render -------------------------------- */
 
+  // Nothing renders until we know whether there is a cached session — otherwise a returning,
+  // already-signed-in visitor would see the login form flash for a moment before their
+  // session loads, which reads as the app forgetting them.
+  if (!ready) return <div className="app auth-boot" aria-hidden="true" />;
+  if (!session) return <Auth />;
+
   return (
     <div className="app" data-accent={accent}>
       <TopBar
@@ -310,6 +371,8 @@ export default function App() {
         onNew={() => setShowInit(true)}
         theme={theme}
         onToggleTheme={toggleTheme}
+        userEmail={session.user?.email}
+        onSignOut={handleSignOut}
       />
 
       <div className="shell">

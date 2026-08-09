@@ -40,6 +40,7 @@ apart to stay inside the free tier's daily quota (see
 - [Providers: text and images](#providers-text-and-images)
 - [What makes the posts varied](#what-makes-the-posts-varied)
 - [Social posting: X and Bluesky](#social-posting-x-and-bluesky)
+- [Multi-user auth](#multi-user-auth)
 - [Known constraints](#known-constraints)
 
 ---
@@ -284,6 +285,11 @@ second set of environment variables.
 npm install
 cp .env.example .env      # then add your key
 # GEMINI_API_KEY=your_key_here   https://aistudio.google.com/apikey
+
+# Auth (required — see Multi-user auth). One Supabase project, two keys, two files:
+cp client/.env.example client/.env.local
+# .env:              SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY   (Settings > API — "Secret key")
+# client/.env.local:  VITE_SUPABASE_URL, VITE_SUPABASE_ANON_KEY  (same page — "Publishable key")
 ```
 
 ### Production mode (single process — exactly what deploys)
@@ -342,6 +348,11 @@ called, and the 48-hour requirement is satisfied entirely by that loop.
 ## API reference
 
 All responses are JSON. The first two are the required surface; the rest are for inspection.
+
+Every route except `/api/health` and `/api/personas` requires `Authorization: Bearer <token>`,
+a Supabase session access token — see [Multi-user auth](#multi-user-auth). The curl examples
+below omit it for brevity; get one by signing in through the app and reading it from
+`localStorage` in devtools, or via `supabase.auth.getSession()` in the browser console.
 
 ### `POST /api/agent/init`
 
@@ -761,6 +772,74 @@ prefix, DB column names, the network's post/compose functions) and return the fu
 operations; `SocialPanel.jsx` and the `SocialBadge` component in `PostCard.jsx` do the same on
 the frontend. Adding a network now means supplying its config, not re-deriving the scheduling
 logic a third time.
+
+## Multi-user auth
+
+Originally single-tenant: whoever could reach the deployed URL could see, trigger, pause, or
+enable social posting on every agent — fine for a local dev server, a real problem once the
+app was live on a public Render URL with real X/Bluesky credentials wired in. Auth turns that
+into a real multi-user app: anyone can sign up, and every agent, post, and rejection belongs to
+exactly one account and is invisible and inaccessible to every other one.
+
+### Supabase is identity only
+
+Supabase Auth issues and verifies sessions; it is never the data store. Agents, posts, and
+rejections stay exactly where they always were — the same SQLite file — with one added column:
+`agents.user_id`, holding the Supabase user's UUID as an opaque string this app never
+interprets further. No Supabase table, no Row Level Security policy, is involved anywhere.
+That single design choice is what kept this from becoming a rewrite: one migration
+(`ensureColumn('agents', 'user_id', ...)`), one ownership check, one auth middleware — not a
+new database.
+
+### How a request gets authenticated
+
+The frontend holds a Supabase session (via `@supabase/supabase-js`, `persistSession: true`) and
+attaches its access token as `Authorization: Bearer <token>` on every API call
+(`client/src/api.js`). The backend's `requireAuth` middleware (`src/auth.js`) verifies that
+token by calling Supabase's own `auth.getUser()` — one network round trip per request, chosen
+deliberately over decoding the JWT locally: this app's request volume is dashboard clicks, not
+a high-QPS API, so correctness (no JWKS fetching, no key rotation to get wrong) was worth more
+than the few milliseconds saved. `/api/health` and `/api/personas` are exempt — deployment
+diagnostics and the read-only persona catalogue, neither touching user data — every other route
+requires a verified session.
+
+### Ownership, not just authentication
+
+Being signed in only proves who you are; `requireOwnedAgent()` (replacing the old
+`requireAgent()`) is what proves you are allowed to touch *this* agent — it 404s, not 403s, on
+a mismatch, so "this agent belongs to someone else" and "this agent does not exist" are
+indistinguishable to the caller. Verified directly, not assumed: a second test account was
+created via the Admin API, logged in through the real UI, and confirmed to see zero agents in
+its roster; a direct API call for another user's agent by id — including a `POST
+/agent/pause` — returned `404` both times, deleted afterward.
+
+### Two real problems hit while wiring this up, neither a code bug
+
+**The account name in the browser dashboard URL was mistranscribed reading it off a
+screenshot** — `lbsnbnumciyqbjbdjro` vs. the real `lbsnbnumciyqbjbdjdro` (one extra `d`).
+`Could not resolve host` on the first attempt was diagnostic: a wrong signature or wrong key
+would 401, but a wrong hostname does not resolve at all. Re-copied directly from the project
+dashboard rather than guessed a second time.
+
+**Supabase's free-tier project has a strict email-sending rate limit, unrelated to API
+usage.** Real signup through the UI failed with `over_email_send_rate_limit` — confirmation
+emails go through Supabase's own shared sender on the free tier, capped low. Hunting for a
+"disable email confirmation" toggle in a reorganised settings UI wasted time it didn't need to;
+the actual fix was the Admin API (`POST /auth/v1/admin/users` with `email_confirm: true`),
+which creates an already-confirmed account with zero emails sent, sidestepping the rate limit
+entirely rather than working around it.
+
+### Migrating agents that predate auth
+
+Eight agents — including "Grace," already autonomously posting real content to a live Bluesky
+account — existed before the `user_id` column did, created with `user_id NULL`. Once auth
+went live those rows would have become invisible to every account (`listAgentsForUser`
+filters on an exact match), while continuing to run: the scheduler's `listAgents()` is
+deliberately unscoped, since the cron loop has to keep every user's agents ticking regardless
+of who is or is not logged in at that moment. Losing UI visibility into an agent that is still
+autonomously posting to a real external account is a real problem, not a cosmetic one, so
+after the real account was created its `user_id` was assigned to all eight rows directly —
+continuity preserved, nothing re-initialized.
 
 ## Known constraints
 

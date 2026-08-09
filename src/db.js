@@ -101,6 +101,14 @@ ensureColumn('posts', 'tweet_error', 'tweet_error TEXT');
 ensureColumn('agents', 'bluesky_enabled', 'bluesky_enabled INTEGER NOT NULL DEFAULT 0');
 ensureColumn('agents', 'next_skeet_at', 'next_skeet_at TEXT');
 ensureColumn('agents', 'last_skeet_at', 'last_skeet_at TEXT');
+// Multi-user ownership. Nullable rather than NOT NULL, because agents created before auth
+// existed have no user to attribute them to — they simply become invisible to every logged-in
+// user (listAgentsForUser filters on a match) rather than the migration failing outright.
+// Supabase is used for authentication only; agent/post data stays in this SQLite file, so no
+// Supabase table or Row Level Security policy is involved — user_id is just the Supabase
+// auth user's UUID, stored as an opaque string this app never needs to interpret further.
+ensureColumn('agents', 'user_id', 'user_id TEXT');
+db.exec('CREATE INDEX IF NOT EXISTS idx_agents_user ON agents(user_id)');
 ensureColumn('posts', 'skeet_id', 'skeet_id TEXT');
 ensureColumn('posts', 'skeet_url', 'skeet_url TEXT');
 ensureColumn('posts', 'skeet_text', 'skeet_text TEXT');
@@ -113,12 +121,12 @@ export const newId = (prefix) => `${prefix}${randomUUID().slice(0, 8)}`;
 
 /* ---------------------------------- agents --------------------------------- */
 
-export function createAgent({ name, domain, personaPrompt, persona, autonomyHours }) {
+export function createAgent({ name, domain, personaPrompt, persona, autonomyHours, userId = null }) {
   const id = newId('a');
   const now = new Date();
   db.prepare(
-    `INSERT INTO agents (id, name, domain, persona_prompt, persona_json, created_at, expires_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO agents (id, name, domain, persona_prompt, persona_json, created_at, expires_at, user_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
   ).run(
     id,
     name,
@@ -126,13 +134,27 @@ export function createAgent({ name, domain, personaPrompt, persona, autonomyHour
     personaPrompt,
     JSON.stringify(persona),
     now.toISOString(),
-    new Date(now.getTime() + autonomyHours * 3600_000).toISOString()
+    new Date(now.getTime() + autonomyHours * 3600_000).toISOString(),
+    userId
   );
   return getAgent(id);
 }
 
 export const getAgent = (id) => db.prepare('SELECT * FROM agents WHERE id = ?').get(id);
+
+/**
+ * Every agent regardless of owner — used only by the scheduler, which must keep every user's
+ * agents ticking, and by nothing that answers an HTTP request. A route handler that used this
+ * instead of listAgentsForUser would leak every user's agent list to whoever asked.
+ */
 export const listAgents = () => db.prepare('SELECT * FROM agents ORDER BY created_at ASC').all();
+
+/** What GET /api/agents actually returns: one user's own agents, nobody else's. */
+export const listAgentsForUser = (userId) =>
+  db.prepare('SELECT * FROM agents WHERE user_id = ? ORDER BY created_at ASC').all(userId);
+
+/** True when this agent belongs to this user — the ownership check every scoped route needs. */
+export const isOwnedBy = (agent, userId) => Boolean(agent && userId && agent.user_id === userId);
 
 /**
  * The persona config is stored per agent, so a restart mid-window resumes with the exact
