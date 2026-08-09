@@ -15,7 +15,6 @@ export default function Auth() {
   const [password, setPassword] = useState('');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
-  const [notice, setNotice] = useState(null);
 
   if (!authConfigured) {
     return (
@@ -36,23 +35,28 @@ export default function Auth() {
     e.preventDefault();
     setBusy(true);
     setError(null);
-    setNotice(null);
     try {
       if (mode === 'signup') {
-        const { error, data } = await supabase.auth.signUp({ email, password });
-        if (error) throw error;
-        // Supabase's default project settings require confirming the address before a
-        // session is issued — data.session is null in that case, so say so rather than
-        // silently doing nothing that looks like the button did not work.
-        if (!data.session) {
-          setNotice('Check your email to confirm your address, then sign in.');
-          setMode('signin');
-        }
-      } else {
+        // Routed through the backend rather than supabase.auth.signUp() directly: that call
+        // needs a confirmed inbox before it issues a session, and free-tier Supabase
+        // rate-limits its own confirmation-email sender tightly enough that real signups
+        // failed outright while building this. /api/auth/signup creates the account already
+        // confirmed, so signing in immediately after works with no email step at all.
+        const res = await fetch('/api/auth/signup', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ email, password }),
+        });
+        const body = await res.json().catch(() => ({}));
+        if (!res.ok) throw new Error(body.error || `Sign-up failed (${res.status})`);
+
         const { error } = await supabase.auth.signInWithPassword({ email, password });
         if (error) throw error;
         // No further action needed — App.jsx's onAuthStateChange listener picks up the new
         // session and swaps this form out for the dashboard.
+      } else {
+        const { error } = await supabase.auth.signInWithPassword({ email, password });
+        if (error) throw error;
       }
     } catch (err) {
       setError(err.message);
@@ -94,7 +98,6 @@ export default function Auth() {
         </label>
 
         {error && <p className="form-error">{error}</p>}
-        {notice && <p className="auth-notice">{notice}</p>}
 
         <button type="submit" className="btn btn-primary auth-submit" disabled={busy}>
           {busy ? 'Working…' : mode === 'signin' ? 'Sign in' : 'Sign up'}
@@ -106,7 +109,6 @@ export default function Auth() {
           onClick={() => {
             setMode((m) => (m === 'signin' ? 'signup' : 'signin'));
             setError(null);
-            setNotice(null);
           }}
           disabled={busy}
         >

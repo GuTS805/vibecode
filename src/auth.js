@@ -39,6 +39,41 @@ function getClient() {
 }
 
 /**
+ * Create an already-confirmed account via the admin API, bypassing Supabase's normal signup
+ * flow entirely.
+ *
+ * The normal flow — `supabase.auth.signUp()` from the browser — sends a confirmation email
+ * before a session is issued, and free-tier Supabase rate-limits its own email sender tightly
+ * enough that real signups failed with `over_email_send_rate_limit` while building this.
+ * There is also no verified-email requirement this app actually needs: it is not a public
+ * service where proving mailbox ownership matters, and every account is isolated from every
+ * other one by `user_id` regardless of how it was created. So signup goes through the backend
+ * instead — `admin.createUser({ email_confirm: true })` creates an account that can sign in
+ * immediately, with zero emails sent and the free-tier rate limit never in the picture.
+ */
+export async function signUp(email, password) {
+  const { data, error } = await getClient().auth.admin.createUser({
+    email,
+    password,
+    email_confirm: true,
+  });
+  if (error) {
+    // Supabase's admin API reports a duplicate email as its own error rather than the
+    // generic-looking "check your email" the public signUp() endpoint gives for the same
+    // case — surfaced here as a normal 409, not swallowed into a vague success state.
+    const e = new Error(
+      /already.*registered|already exists/i.test(error.message)
+        ? 'An account with that email already exists. Sign in instead.'
+        : error.message
+    );
+    e.code = /already.*registered|already exists/i.test(error.message) ? 'EMAIL_TAKEN' : 'SIGNUP_FAILED';
+    e.retryable = false;
+    throw e;
+  }
+  return data.user;
+}
+
+/**
  * Express middleware: every /api/agent/* route needs a real, verified user before it does
  * anything, since every one of those routes now reads or writes data scoped to a user_id.
  * Missing config surfaces as 503 (an operator problem — fix the deployment), a missing or

@@ -12,7 +12,7 @@ import {
 import { getActiveModel, getTextProvider } from './llm.js';
 import { isConfigured as twitterConfigured, isDryRun as twitterDryRun, verifyCredentials as verifyTwitter } from './twitter.js';
 import { isConfigured as blueskyConfigured, isDryRun as blueskyDryRun, verifyCredentials as verifyBluesky } from './bluesky.js';
-import { requireAuth } from './auth.js';
+import { requireAuth, signUp } from './auth.js';
 
 export const router = Router();
 
@@ -37,6 +37,34 @@ router.get('/health', (_req, res) => {
     blueskyDryRun: blueskyDryRun(),
     uptime: process.uptime(),
   });
+});
+
+/**
+ * Account creation, done server-side rather than by the frontend calling
+ * `supabase.auth.signUp()` directly. That call requires confirming a real inbox before a
+ * session is issued, and free-tier Supabase rate-limits its own confirmation-email sender
+ * tightly enough that real signups failed outright while building this — see auth.js and
+ * README > Multi-user auth for the specifics. This account creates already-confirmed and
+ * signs in immediately.
+ *
+ * Public, ahead of requireAuth: signing up is how someone becomes authenticated, so it
+ * cannot itself require being authenticated already.
+ */
+router.post('/auth/signup', async (req, res) => {
+  const email = String(req.body?.email || '').trim();
+  const password = String(req.body?.password || '');
+  if (!email || !password) return bad(res, 'email and password are both required');
+  if (password.length < 6) return bad(res, 'password must be at least 6 characters');
+
+  try {
+    const user = await signUp(email, password);
+    res.json({ ok: true, userId: user.id, email: user.email });
+  } catch (err) {
+    if (err.code === 'AUTH_NOT_CONFIGURED') {
+      return res.status(503).json({ error: err.message, code: err.code });
+    }
+    res.status(err.code === 'EMAIL_TAKEN' ? 409 : 500).json({ error: err.message, code: err.code });
+  }
 });
 
 /* ------------------------------ everything else ----------------------------- */

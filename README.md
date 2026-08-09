@@ -349,10 +349,28 @@ called, and the 48-hour requirement is satisfied entirely by that loop.
 
 All responses are JSON. The first two are the required surface; the rest are for inspection.
 
-Every route except `/api/health` and `/api/personas` requires `Authorization: Bearer <token>`,
-a Supabase session access token — see [Multi-user auth](#multi-user-auth). The curl examples
-below omit it for brevity; get one by signing in through the app and reading it from
-`localStorage` in devtools, or via `supabase.auth.getSession()` in the browser console.
+Every route except `/api/health`, `/api/personas`, and `/api/auth/signup` requires
+`Authorization: Bearer <token>`, a Supabase session access token — see
+[Multi-user auth](#multi-user-auth). The curl examples below omit it for brevity; get one by
+signing in through the app and reading it from `localStorage` in devtools, or via
+`supabase.auth.getSession()` in the browser console.
+
+### `POST /api/auth/signup`
+
+Creates an account, already confirmed — see [Multi-user auth](#multi-user-auth) for why this
+exists instead of calling `supabase.auth.signUp()` from the frontend. Sign in immediately
+afterward with `supabase.auth.signInWithPassword()`; this endpoint only creates the account.
+
+```bash
+curl -X POST localhost:3000/api/auth/signup -H 'Content-Type: application/json' \
+  -d '{"email":"you@example.com","password":"at least 6 characters"}'
+```
+
+```json
+{ "ok": true, "userId": "0555340a-...", "email": "you@example.com" }
+```
+
+`409` with `code: EMAIL_TAKEN` if the address is already registered.
 
 ### `POST /api/agent/init`
 
@@ -844,11 +862,28 @@ dashboard rather than guessed a second time.
 
 **Supabase's free-tier project has a strict email-sending rate limit, unrelated to API
 usage.** Real signup through the UI failed with `over_email_send_rate_limit` — confirmation
-emails go through Supabase's own shared sender on the free tier, capped low. Hunting for a
-"disable email confirmation" toggle in a reorganised settings UI wasted time it didn't need to;
-the actual fix was the Admin API (`POST /auth/v1/admin/users` with `email_confirm: true`),
-which creates an already-confirmed account with zero emails sent, sidestepping the rate limit
-entirely rather than working around it.
+emails go through Supabase's own shared sender on the free tier, capped low. The first fix was
+a one-off admin-API workaround for a single account; the real fix, described next, made it
+permanent for every signup rather than something that needed redoing per user.
+
+### Signup goes through the backend, not `supabase.auth.signUp()`
+
+The frontend's sign-up form does not call Supabase directly. It posts to
+`POST /api/auth/signup` (`src/routes.js`), which calls `auth.admin.createUser({ email_confirm:
+true })` (`src/auth.js`) — the same admin-API call used for the one-off fix above, now the
+actual signup path. The account is created already confirmed; the frontend then calls
+`supabase.auth.signInWithPassword()` immediately after, establishing a session with no email
+step at all, ever, for anyone.
+
+This is a deliberate trade, not an oversight: the normal flow proves the signer-upper controls
+the inbox they typed, which this app does not need — it is not a public service where that
+matters, and every account is isolated from every other one by `user_id` regardless of how it
+was created. Skipping it also means the free-tier rate limit that blocked real signups during
+development is permanently out of the picture, not something to hit again with the next new
+user. `POST /api/auth/signup` is intentionally public (mounted ahead of `requireAuth` in
+`routes.js`) — signing up is how someone becomes authenticated, so it cannot itself require
+being authenticated already — and duplicate emails are rejected with `409 EMAIL_TAKEN` rather
+than Supabase's own ambiguous anti-enumeration response.
 
 ### Migrating agents that predate auth
 

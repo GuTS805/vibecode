@@ -882,3 +882,42 @@ adversarial pattern as the original isolation check, applied to a destructive ac
 Browser-verified end to end in headless Chrome: clicking a stopped agent's chip shows a `Delete`
 button in place of Pause/Resume, clicking it triggers a confirmation dialog, and accepting
 removes it from the switcher immediately — 5/5.
+
+---
+
+## 11 — Fix signup properly: no email step, for anyone (2026-08-09)
+
+**Request:** signup was asking to confirm an email, and it was not clear what to do next — a
+real problem, since the previous session's fix only covered the one account I had created
+manually via the Admin API. Anyone else signing up would hit the same dead end.
+
+The one-off fix and the real fix use the same underlying call
+(`auth.admin.createUser({ email_confirm: true })`), but where it lives matters. Previously it
+was something I ran once, by hand, for one email address. Now it is the actual signup path:
+`POST /api/auth/signup` (`src/routes.js`) calls it for every account, and the frontend's
+sign-up form (`Auth.jsx`) posts there instead of calling `supabase.auth.signUp()` directly.
+The account is created already confirmed; the frontend signs in immediately after with
+`supabase.auth.signInWithPassword()`. No email step exists in this app's signup flow at all,
+for anyone, ever — not "until you hit the rate limit again."
+
+This is a deliberate product decision, not just a technical workaround, and worth stating as
+one: the normal flow proves the signer-upper controls the inbox they typed, which this app
+does not need. It is not a public service where that matters, and every account is isolated
+from every other one by `user_id` regardless of how it was created — skipping email
+verification does not weaken that isolation at all, it only removes a step that was adding
+friction and, on the free tier, breaking outright.
+
+`POST /api/auth/signup` had to be mounted deliberately public — ahead of `requireAuth` in
+`routes.js` — since signing up is how someone becomes authenticated in the first place, so it
+cannot itself require being authenticated already. Duplicate-email is reported as a plain
+`409 EMAIL_TAKEN`, rather than Supabase's own public `signUp()` behaviour of returning an
+ambiguous "check your email" response for both a genuine new signup and an existing address
+(anti-enumeration behaviour that was itself part of the original confusion, before the
+backend-signup path replaced the call it came from).
+
+Verified beyond the happy path: a brand-new email signs up and lands directly in the
+dashboard with zero agents (isolation holds from the very first second an account exists, not
+just after manual linking); a second signup attempt with the same email returns `409` rather
+than the previous silent-feeling "check your email"; and a full browser run confirmed no
+email-related UI state appears anywhere in the flow — 3/3. Both throwaway test accounts
+deleted afterward via the Admin API.
