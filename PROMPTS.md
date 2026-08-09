@@ -967,3 +967,57 @@ just that confirmation got bypassed somehow. Re-ran the identical scenario throu
 headless-Chrome sign-in (not just the API) for a third such account: 2/2. The original stuck
 account and the known-good account were both confirmed intact and working afterward, and every
 disposable test account was deleted.
+
+---
+
+## 13 — Make the UI genuinely good, without touching behaviour (2026-08-09)
+
+**Prompt:** *"iska ui bht acha bana do bina koi functionality badle"* — make the UI much
+better, without changing any functionality.
+
+The constraint is the interesting half: no handler, no API call, no state transition, and no
+prop contract could change. Everything had to come out of CSS and the markup that CSS hangs
+off. So the work started by looking at the thing rather than at the stylesheet — seven
+screenshots across both themes, three viewport widths, and every tab, taken through headless
+Chrome against the running app.
+
+**That immediately found a real defect nobody had reported.** The agent switcher was
+`justify-content: flex-end` with `overflow-x: auto`. A flex row that overflows while
+end-aligned overflows off its *start* edge, and the leading chip ends up permanently clipped
+with no scroll position that brings it back — the first agent in the roster was literally
+unreachable at 1440px with six agents. Left-aligning the rail fixes it outright; a mask
+gradient on the trailing edge now makes the cut chip read as "more this way" instead of as a
+rendering bug. Long beat names are truncated with an ellipsis so one agent called *AI Policy
+& Regulation* cannot push four others off the rail.
+
+**The sign-in screen was the biggest gap between what the product is and what it looked
+like.** It rendered a lone 380px card on a flat grey field — and it is the only screen a
+first-time visitor, or a judge, sees before deciding whether any of this is interesting. It is
+now a split: the left half states what the agents actually do and shows the six-persona roster
+waiting behind the form, the right half is the form. Below 860px the hero is dropped entirely
+rather than stacked, because on a phone it would just be a screen of copy between the visitor
+and the password field. The gate renders outside `.app`, so it never inherited that element's
+accent wash — it now has its own, lit by three different persona hues rather than one, since
+at that point no agent is selected and six of them are the point.
+
+**One typographic decision does most of the remaining work.** Chrome — nav, panels, telemetry
+— stays in Space Grotesk and Inter, because that half of the screen is an instrument panel.
+The post headlines moved to Newsreader, a newspaper serif. A feed of AI-written articles set
+in dashboard UI type reads as log output; the whole claim of the project is that the output is
+worth reading, and the serif says so before a single word is.
+
+The rest is depth and hierarchy: the persona header became a card carrying the active agent's
+accent as a wash, so switching agents visibly re-lights the top of the screen; panel titles got
+a short accent rule so the sidebar reads as one instrument cluster rather than three unrelated
+boxes; the stat grid became a hairline-divided block; the live-facts became discrete readouts;
+`Sign in`/`Sign up` became a segmented control with both modes visible at once, since the old
+"switch to the other mode" link is exactly how a returning visitor ends up clicking Sign up on
+an account they already have.
+
+**Verified as a behaviour regression, not just looked at.** 22 headless-Chrome checks covering
+the parts most likely to have been broken by markup changes: both auth modes switch and the
+submit button follows, real sign-in still completes end to end, the first agent chip is
+provably not clipped (`firstFullyVisible: true`, 6 chips, 117px of reachable scroll), switching
+agents changes the header and re-keys the accent, all three tabs activate, the new-agent form
+opens/lists 7 personas/cancels, the theme toggle flips, both social switches render enabled,
+and no horizontal page overflow at 1440 / 1024 / 768 / 390px. 22/22, no JS errors.
