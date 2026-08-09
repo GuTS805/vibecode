@@ -48,6 +48,11 @@ export const pauseAgent = lifecycle('pause');
 export const resumeAgent = lifecycle('resume');
 export const stopAgent = lifecycle('stop');
 
+/** Permanently removes a stopped agent and everything it produced. Backend rejects this for
+ *  any agent not already stopped, so the switcher only offers it in that state. */
+export const deleteAgent = (agentId) =>
+  req(`/api/agent?agentId=${encodeURIComponent(agentId)}`, { method: 'DELETE' });
+
 /**
  * Social posting: opt-in per agent per network, independent of the write cycle's own
  * lifecycle. X and Bluesky expose identical endpoint shapes under /agent/{network}/..., so

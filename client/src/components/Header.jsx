@@ -48,7 +48,7 @@ function stateLabel(status) {
   return { cls: 'state-off', text: 'window closed' };
 }
 
-export default function Header({ agent, status, tick, onPause, onResume, onStop, lifecycleBusy }) {
+export default function Header({ agent, status, tick, onPause, onResume, onStop, onDelete, lifecycleBusy }) {
   const running = status?.cycleRunningNow;
   // `tick` is unused directly — it exists so the parent's 1s timer re-renders the countdown.
   void tick;
@@ -114,6 +114,17 @@ export default function Header({ agent, status, tick, onPause, onResume, onStop,
               )}
               <button className="btn btn-sm btn-danger" onClick={onStop} disabled={lifecycleBusy}>
                 ■ Stop
+              </button>
+            </div>
+          )}
+
+          {/* Stopped agents pile up in the switcher with no further use — resume is closed
+              off deliberately (see setLifecycle). Delete is the way to actually clear one
+              out, offered only here since it is destructive and only valid on a dead end. */}
+          {state === 'stopped' && (
+            <div className="lifecycle-controls">
+              <button className="btn btn-sm btn-danger" onClick={onDelete} disabled={lifecycleBusy}>
+                🗑 Delete
               </button>
             </div>
           )}

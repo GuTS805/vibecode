@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import {
   createAgent, getAgent, listAgents, listAgentsForUser, isOwnedBy, getPosts, getRejections,
-  countStats, loadPersona, agentState, twitterEnabled, blueskyEnabled,
+  countStats, loadPersona, agentState, twitterEnabled, blueskyEnabled, deleteAgent,
 } from './db.js';
 import { resolvePersona, personaSystemPrompt, listRegistryPersonas } from './persona.js';
 import {
@@ -288,6 +288,30 @@ function lifecycleHandler(state) {
 router.post('/agent/pause', lifecycleHandler('paused'));
 router.post('/agent/resume', lifecycleHandler('active'));
 router.post('/agent/stop', lifecycleHandler('stopped'));
+
+/**
+ * Permanently removes an agent and everything it produced. Restricted to agents already
+ * `stopped` — an active or paused agent can still be resumed, so deleting it would destroy
+ * something recoverable; a stopped one is already a dead end, so this is a natural second
+ * step rather than a separate kind of danger. The frontend surfaces this specifically to
+ * clear stopped agents out of the switcher once they are no longer wanted.
+ */
+router.delete('/agent', (req, res) => {
+  const agent = requireOwnedAgent(req, res);
+  if (!agent) return;
+
+  if (agentState(agent) !== 'stopped') {
+    return res.status(409).json({
+      error: `${agent.name} must be stopped before it can be deleted.`,
+      code: 'AGENT_NOT_STOPPED',
+      state: agentState(agent),
+    });
+  }
+
+  deleteAgent(agent.id);
+  console.log(`[delete] agent ${agent.id} "${agent.name}" removed by user ${req.userId}`);
+  res.json({ ok: true, agentId: agent.id });
+});
 
 /* ------------------------- X (Twitter) posting -------------------------- */
 

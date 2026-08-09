@@ -850,3 +850,35 @@ second account's token, and a `POST /agent/pause` against the same id, both retu
 throwaway account was deleted immediately after. Also verified in headless Chrome for the real
 account: 5/5 — login succeeds, all eight agents appear, Grace specifically visible with her
 published posts, sign-out control present, no console errors.
+
+---
+
+## 10 — Delete stopped agents (2026-08-09)
+
+**Request:** the switcher was cluttered with stopped agents (leftovers from testing sessions
+across this build) with no way to remove them, and a restated confirmation that per-user
+isolation should mean each account only ever sees its own data.
+
+The isolation half needed no new work — it was built and adversarially verified in the previous
+session (a disposable second account saw an empty roster; direct API calls for another
+account's agent, including a mutating one, both 404'd). The agents the user was seeing were
+their own, correctly, including ones I had linked to their account per their own earlier
+request.
+
+The clutter half was real: `stop` was deliberately designed as a dead end (closes the autonomy
+window, cannot be resumed), but nothing let an operator actually remove a dead-end agent from
+view. Added `DELETE /api/agent`, restricted to agents already `stopped` — an active or paused
+agent can still be resumed, so deleting it would destroy something recoverable, while a stopped
+one has no further use, making delete the natural next step rather than a new category of
+danger. Cascades to posts and rejections via the `ON DELETE CASCADE` already on both child
+tables, so no new cleanup logic was needed there.
+
+Verified the two things this control actually needs to get right: the state restriction (an
+active agent's delete attempt correctly 409s with `AGENT_NOT_STOPPED`; a stopped one deletes,
+confirmed via direct DB query — 0 leftover posts, 0 leftover rejections, agent row gone) and
+ownership (a second disposable account's attempt to delete a different account's stopped agent
+returned `404`, and the agent was confirmed still present for its real owner afterward — same
+adversarial pattern as the original isolation check, applied to a destructive action this time).
+Browser-verified end to end in headless Chrome: clicking a stopped agent's chip shows a `Delete`
+button in place of Pause/Resume, clicking it triggers a confirmation dialog, and accepting
+removes it from the switcher immediately — 5/5.

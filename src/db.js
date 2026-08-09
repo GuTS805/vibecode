@@ -196,6 +196,16 @@ export function setAgentState(agentId, state) {
 /** Rows created before the state column existed have no value; treat those as active. */
 export const agentState = (agent) => agent?.state || 'active';
 
+/**
+ * Permanently remove an agent and everything it produced — posts, rejections, tweet/skeet
+ * records — via the `ON DELETE CASCADE` on both child tables. The route calling this
+ * restricts it to agents already in the `stopped` state; nothing here re-checks that, since
+ * this is the storage layer and the lifecycle rule belongs with the route that enforces it.
+ */
+export function deleteAgent(agentId) {
+  db.prepare('DELETE FROM agents WHERE id = ?').run(agentId);
+}
+
 /** When the next autonomous cycle is due. */
 export function setNextCycle(agentId, nextCycleAt) {
   db.prepare('UPDATE agents SET next_cycle_at = ? WHERE id = ?').run(nextCycleAt, agentId);

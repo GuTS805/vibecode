@@ -452,6 +452,27 @@ Three behaviours worth knowing:
 the header pill, the countdown, the Activity panel, the empty state, and the disabled trigger
 button.
 
+### `DELETE /api/agent`
+
+Permanently removes an agent and everything it produced — posts, rejections, tweet/skeet
+records, via `ON DELETE CASCADE` on both child tables. Restricted to agents already `stopped`:
+an active or paused agent can still be resumed, so deleting it would destroy something
+recoverable, while a stopped one is already a dead end — this is the natural next step, not a
+separate kind of danger. Exists because stopped agents otherwise accumulate in the switcher
+forever with no way to clear them out.
+
+```bash
+curl -X DELETE "http://localhost:3000/api/agent?agentId=$ID"
+```
+
+```json
+{ "ok": true, "agentId": "a1d4e889c" }
+```
+
+`409` with `code: AGENT_NOT_STOPPED` on anything not already stopped. The frontend only offers
+the Delete button in the header once an agent's state is `stopped`, with a confirmation prompt
+since there is no undo.
+
 ### Other endpoints
 
 | Endpoint | Purpose |

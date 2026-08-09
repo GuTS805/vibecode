@@ -301,6 +301,46 @@ export default function App() {
   }
 
   /**
+   * Delete a stopped agent. Unlike pause/resume/stop, the agent stops existing afterward, so
+   * this cannot reuse handleLifecycle's "re-fetch this agent's data" pattern — the switcher
+   * has to lose the entry, and if it was the active one, something else has to take its place
+   * (or the init form, if that was the last agent standing).
+   */
+  async function handleDelete() {
+    if (!activeId || lifecycleBusy) return;
+    const name = activeAgent?.name || 'This agent';
+    if (
+      !window.confirm(
+        `Delete ${name} permanently?\n\nThis removes it and everything it published — there is ` +
+          `no undo. Only stopped agents can be deleted.`
+      )
+    ) {
+      return;
+    }
+
+    setLifecycleBusy(true);
+    const deletedId = activeId;
+    try {
+      await api.deleteAgent(deletedId);
+      const remaining = await loadAgents();
+      seenIds.current = new Set();
+      if (remaining.length) {
+        setActiveId(remaining[0].agentId);
+      } else {
+        setActiveId(null);
+        setShowInit(true);
+      }
+      setToast(`${name} deleted.`);
+      setTimeout(() => setToast(null), 6000);
+    } catch (err) {
+      setToast(err.message);
+      setTimeout(() => setToast(null), 6000);
+    } finally {
+      setLifecycleBusy(false);
+    }
+  }
+
+  /**
    * Social posting toggle and manual "post now", shared across X and Bluesky. Independent of
    * handleLifecycle: an agent's write cycle and its promotion to any given network are
    * separate switches (see scheduler.js), so a failure or busy-state in one network must not
@@ -406,6 +446,7 @@ export default function App() {
               onPause={() => handleLifecycle('pause')}
               onResume={() => handleLifecycle('resume')}
               onStop={() => handleLifecycle('stop')}
+              onDelete={handleDelete}
               lifecycleBusy={lifecycleBusy}
             />
 
