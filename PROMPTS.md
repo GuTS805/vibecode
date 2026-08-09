@@ -724,3 +724,57 @@ empty-queue handling, the lifecycle guard (409 on a stopped agent, confirmed via
 inspection that the *test* — not the code — had accidentally left an agent's autonomy window
 closed), and 8/8 checks in headless Chrome covering the panel, the dry-run notice, the tweet
 badges on post cards, and the enable/disable toggle round-trip.
+
+---
+
+## 8 — Bluesky as the free alternative (2026-08-08)
+
+**Request:** X's pay-per-usage plan blocked posting even after adding a payment method
+(balance stayed `$0.00` — the card was saved, not spent from). Asked for a free alternative
+platform to showcase the project's posts.
+
+Presented Bluesky and Mastodon as genuinely free options with no billing tier for basic
+posting; the user chose Bluesky. Verified the API was live and correctly shaped before writing
+any integration code — `describeServer` (public, no auth) and a deliberately-wrong
+`createSession` call both returned clean, expected JSON, unlike the ambiguous 401 X had given.
+
+**Auth is simpler than X's, and that simplicity is real, not just fewer steps.** A handle plus
+an app password (from Bluesky's own settings, distinct from and independently revocable from
+the account password — same "not your real password" rule explained for X) exchanges for a
+session JWT with one POST call. No OAuth signing, no redirect flow, no expiring-token refresh
+logic to write. `src/bluesky.js` re-authenticates on every post rather than caching the JWT,
+since at a cadence of hours between posts the extra login call costs nothing in practice and
+removes an entire class of stale-token bugs before they could exist.
+
+**Two real differences from Twitter's character handling had to be gotten right, not assumed
+close enough.** Bluesky's 300-character limit counts grapheme clusters, not UTF-16 code units
+— `Intl.Segmenter` used instead of `.length`, verified against emoji and combining characters,
+none of which `composeTweet`'s approach would have counted correctly if copy-pasted. And
+Bluesky does not shorten URLs the way X's t.co does, so the link's real length has to be
+reserved in the budget directly; tested against an artificially long URL to confirm the
+takeaway still trims correctly rather than silently overflowing 300 graphemes. A clickable link
+also needs an explicit byte-offset "facet," which was verified to round-trip correctly
+(extracting the link back out of the composed text via the computed byte offsets) rather than
+trusted on the strength of reading the spec once.
+
+**Refactored to one scheduler implementation instead of duplicating X's.** Bluesky needed the
+exact same shape as the X promotion logic just shipped: its own cadence, oldest-post-first
+ordering, and the post-specific-vs-account-level failure distinction. Copying ~150 lines with
+`bluesky` substituted for `twitter` would have been a second copy to keep in sync, and a third
+network (Mastodon) was a real option on the table minutes earlier — so `makeSocialScheduler()`
+and `makeSocialOps()` (in `scheduler.js` and `db.js` respectively) now take a small config
+object per network and generate the operations, and the frontend's `SocialPanel` /
+`SocialBadge` do the same. Adding a network is now supplying config, not re-deriving scheduling
+logic a third time.
+
+**One inconsistency caught before it shipped:** `bluesky.js`'s dry-run default read
+`=== 'true'` (default off) where `twitter.js`'s read `!== 'false'` (default on) — an unsafe
+default for a network with no real credentials configured yet, which would have meant "posting
+is on unless you remember to turn it off" rather than the other way round. Fixed to match
+Twitter's convention before any testing, since the wrong default here is exactly the kind of
+thing that only gets noticed after it has already posted something.
+
+Verified end to end in dry-run: both networks' enable/disable/status/tweet-now, the pause/stop
+lifecycle guard on both independently, and a browser check confirming both `SocialPanel`
+instances render side by side with independent state (X off, Bluesky on) and the `🦋` badge
+appears on a post promoted only to Bluesky.

@@ -1,15 +1,17 @@
 import { Router } from 'express';
 import {
   createAgent, getAgent, listAgents, getPosts, getRejections, countStats, loadPersona, agentState,
-  twitterEnabled,
+  twitterEnabled, blueskyEnabled,
 } from './db.js';
 import { resolvePersona, personaSystemPrompt, listRegistryPersonas } from './persona.js';
 import {
   primeFirstCycle, runCycleGuarded, schedulerInfo, AUTONOMY_HOURS, isRunning, setLifecycle,
   setTweeting, tweetNowGuarded, isTweeting,
+  setSkeeting, skeetNowGuarded, isSkeeting,
 } from './scheduler.js';
 import { getActiveModel, getTextProvider } from './llm.js';
-import { isConfigured as twitterConfigured, isDryRun as twitterDryRun, verifyCredentials } from './twitter.js';
+import { isConfigured as twitterConfigured, isDryRun as twitterDryRun, verifyCredentials as verifyTwitter } from './twitter.js';
+import { isConfigured as blueskyConfigured, isDryRun as blueskyDryRun, verifyCredentials as verifyBluesky } from './bluesky.js';
 
 export const router = Router();
 
@@ -103,6 +105,11 @@ router.get('/agent/status', (req, res) => {
       ...sched.twitter,
       configured: twitterConfigured(),
       dryRun: twitterDryRun(),
+    },
+    bluesky: {
+      ...sched.bluesky,
+      configured: blueskyConfigured(),
+      dryRun: blueskyDryRun(),
     },
     model: getActiveModel(),
     textProvider: getTextProvider(),
@@ -343,7 +350,94 @@ router.get('/twitter/verify', async (_req, res) => {
     return res.status(503).json({ error: 'Twitter credentials are not set.', code: 'NO_CREDENTIALS' });
   }
   try {
-    const user = await verifyCredentials();
+    const user = await verifyTwitter();
+    res.json({ ok: true, user });
+  } catch (err) {
+    res.status(err.code === 'AUTH_FAILED' ? 401 : 500).json({ error: err.message, code: err.code });
+  }
+});
+
+/* --------------------------- Bluesky posting ----------------------------- */
+
+/**
+ * Same shape as the X (Twitter) block above — a second, independent opt-in per agent. See
+ * README > X (Twitter) posting / Bluesky posting for why the free/no-billing-gate difference
+ * made this worth adding as a genuine alternative rather than only documenting the gate.
+ */
+router.post('/agent/bluesky/enable', (req, res) => {
+  const agent = requireAgent(req, res);
+  if (!agent) return;
+  setSkeeting(agent.id, true);
+  res.json({
+    ok: true,
+    agentId: agent.id,
+    enabled: true,
+    dryRun: blueskyDryRun(),
+    configured: blueskyConfigured(),
+    nextTweetAt: schedulerInfo(agent.id).bluesky.nextTweetAt,
+  });
+});
+
+router.post('/agent/bluesky/disable', (req, res) => {
+  const agent = requireAgent(req, res);
+  if (!agent) return;
+  setSkeeting(agent.id, false);
+  res.json({ ok: true, agentId: agent.id, enabled: false });
+});
+
+router.get('/agent/bluesky/status', (req, res) => {
+  const agent = requireAgent(req, res);
+  if (!agent) return;
+  const sched = schedulerInfo(agent.id);
+  res.json({
+    agentId: agent.id,
+    configured: blueskyConfigured(),
+    dryRun: blueskyDryRun(),
+    ...sched.bluesky,
+  });
+});
+
+router.post('/agent/bluesky/tweet-now', async (req, res) => {
+  const agent = requireAgent(req, res);
+  if (!agent) return;
+
+  const state = agentState(agent);
+  if (state !== 'active') {
+    return res.status(409).json({
+      error:
+        state === 'stopped'
+          ? `${agent.name} has been stopped and will not post to Bluesky.`
+          : `${agent.name} is paused. Resume it before posting.`,
+      code: state === 'stopped' ? 'AGENT_STOPPED' : 'AGENT_PAUSED',
+      state,
+    });
+  }
+
+  if (!blueskyEnabled(agent)) {
+    return res.status(409).json({
+      error: `Bluesky posting is not enabled for ${agent.name}. Call /api/agent/bluesky/enable first.`,
+      code: 'BLUESKY_DISABLED',
+    });
+  }
+  if (isSkeeting(agent.id)) {
+    return res.status(409).json({ error: 'A post attempt is already in flight for this agent.' });
+  }
+
+  try {
+    const result = await skeetNowGuarded(agent.id);
+    res.json({ ok: true, dryRun: blueskyDryRun(), ...result });
+  } catch (err) {
+    console.error('[bluesky/tweet-now]', err);
+    res.status(500).json({ error: err.message, code: err.code || 'UNKNOWN' });
+  }
+});
+
+router.get('/bluesky/verify', async (_req, res) => {
+  if (!blueskyConfigured()) {
+    return res.status(503).json({ error: 'Bluesky credentials are not set.', code: 'NO_CREDENTIALS' });
+  }
+  try {
+    const user = await verifyBluesky();
     res.json({ ok: true, user });
   } catch (err) {
     res.status(err.code === 'AUTH_FAILED' ? 401 : 500).json({ error: err.message, code: err.code });
@@ -363,6 +457,7 @@ router.get('/agents', (_req, res) => {
       posts: countStats(a.id).accepted,
       state: agentState(a),
       twitterEnabled: twitterEnabled(a),
+      blueskyEnabled: blueskyEnabled(a),
     })),
   });
 });
@@ -378,6 +473,8 @@ router.get('/health', (_req, res) => {
     textProvider: getTextProvider(),
     twitterConfigured: twitterConfigured(),
     twitterDryRun: twitterDryRun(),
+    blueskyConfigured: blueskyConfigured(),
+    blueskyDryRun: blueskyDryRun(),
     uptime: process.uptime(),
   });
 });

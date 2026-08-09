@@ -96,6 +96,17 @@ ensureColumn('posts', 'tweet_text', 'tweet_text TEXT');
 ensureColumn('posts', 'tweet_posted_at', 'tweet_posted_at TEXT');
 ensureColumn('posts', 'tweet_dry_run', 'tweet_dry_run INTEGER');
 ensureColumn('posts', 'tweet_error', 'tweet_error TEXT');
+// Bluesky mirrors the Twitter columns exactly — same shape, different network, both optional
+// and independent per agent.
+ensureColumn('agents', 'bluesky_enabled', 'bluesky_enabled INTEGER NOT NULL DEFAULT 0');
+ensureColumn('agents', 'next_skeet_at', 'next_skeet_at TEXT');
+ensureColumn('agents', 'last_skeet_at', 'last_skeet_at TEXT');
+ensureColumn('posts', 'skeet_id', 'skeet_id TEXT');
+ensureColumn('posts', 'skeet_url', 'skeet_url TEXT');
+ensureColumn('posts', 'skeet_text', 'skeet_text TEXT');
+ensureColumn('posts', 'skeet_posted_at', 'skeet_posted_at TEXT');
+ensureColumn('posts', 'skeet_dry_run', 'skeet_dry_run INTEGER');
+ensureColumn('posts', 'skeet_error', 'skeet_error TEXT');
 
 export const nowISO = () => new Date().toISOString().replace(/\.\d{3}Z$/, 'Z');
 export const newId = (prefix) => `${prefix}${randomUUID().slice(0, 8)}`;
@@ -226,6 +237,17 @@ export function getPosts(agentId) {
             postedAt: r.tweet_error ? null : r.tweet_posted_at,
           }
         : null,
+      skeet: r.skeet_posted_at
+        ? {
+            id: r.skeet_id || null,
+            url: r.skeet_url || null,
+            text: r.skeet_text || null,
+            dryRun: Boolean(r.skeet_dry_run),
+            error: r.skeet_error || null,
+            attemptedAt: r.skeet_posted_at,
+            postedAt: r.skeet_error ? null : r.skeet_posted_at,
+          }
+        : null,
     }));
 }
 
@@ -292,63 +314,83 @@ export function getMemory(agentId) {
   };
 }
 
-/* --------------------------------- twitter ----------------------------------- */
-
-export function setTwitterEnabled(agentId, enabled) {
-  db.prepare('UPDATE agents SET twitter_enabled = ? WHERE id = ?').run(enabled ? 1 : 0, agentId);
-  return getAgent(agentId);
-}
-
-export const twitterEnabled = (agent) => Boolean(agent?.twitter_enabled);
-
-export function setNextTweet(agentId, nextAt) {
-  db.prepare('UPDATE agents SET next_tweet_at = ? WHERE id = ?').run(nextAt, agentId);
-}
-
-export function touchLastTweet(agentId) {
-  db.prepare('UPDATE agents SET last_tweet_at = ? WHERE id = ?').run(new Date().toISOString(), agentId);
-}
+/* ------------------------------- social posting ------------------------------- */
 
 /**
- * The oldest published post this agent has not yet attempted to tweet.
- *
- * Oldest first, not newest: tweeting is decoupled from the write cycle and runs slower, so a
- * burst of two or three posts from one cycle should reach the timeline in the order they were
- * published rather than the most recent one jumping the queue.
+ * X and Bluesky are wired identically: an enable flag and a next/last timestamp on the agent
+ * row, and a tweet_id/url/text/dry_run/error/posted_at group on each post recording whether
+ * and how it was promoted. Rather than hand-write that CRUD twice, one factory generates both
+ * networks' operations from their column prefixes — the SQL shape is the interesting part and
+ * it is identical, so only the prefix should differ. A third network (there was a real "add
+ * Mastodon too" option on the table when this shipped) is a one-line addition, not a copy of
+ * this whole block with `bluesky` swapped for `mastodon` and one typo away from a silent bug.
  */
-export function getNextUntweetedPost(agentId) {
-  return db
-    .prepare(
-      `SELECT * FROM posts WHERE agent_id = ? AND tweet_posted_at IS NULL
-       ORDER BY datetime(created_at) ASC, rowid ASC LIMIT 1`
-    )
-    .get(agentId);
+function makeSocialOps(network, { enabledCol, nextCol, lastCol, idCol, urlCol, textCol, dryRunCol, errorCol, postedCol }) {
+  const setEnabled = (agentId, enabled) => {
+    db.prepare(`UPDATE agents SET ${enabledCol} = ? WHERE id = ?`).run(enabled ? 1 : 0, agentId);
+    return getAgent(agentId);
+  };
+
+  const isEnabled = (agent) => Boolean(agent?.[enabledCol]);
+
+  const setNext = (agentId, nextAt) => {
+    db.prepare(`UPDATE agents SET ${nextCol} = ? WHERE id = ?`).run(nextAt, agentId);
+  };
+
+  const touchLast = (agentId) => {
+    db.prepare(`UPDATE agents SET ${lastCol} = ? WHERE id = ?`).run(new Date().toISOString(), agentId);
+  };
+
+  // Oldest first, not newest: promotion is decoupled from the write cycle and runs slower, so
+  // a burst of two or three posts from one cycle reaches the timeline in the order they were
+  // published rather than the most recent one jumping the queue.
+  const getNextUnposted = (agentId) =>
+    db
+      .prepare(
+        `SELECT * FROM posts WHERE agent_id = ? AND ${postedCol} IS NULL
+         ORDER BY datetime(created_at) ASC, rowid ASC LIMIT 1`
+      )
+      .get(agentId);
+
+  // A failure is recorded too (as an error, with the posted-at column left null) rather than
+  // left unmarked, so a transient failure does not retry the same post forever if the
+  // underlying cause is not transient — the caller decides whether to leave it eligible for
+  // the next tick or mark it permanently attempted.
+  const recordResult = (postId, { id = null, url = null, text, dryRun, error = null, attempted = true }) => {
+    db.prepare(
+      `UPDATE posts SET ${idCol} = ?, ${urlCol} = ?, ${textCol} = ?, ${dryRunCol} = ?, ${errorCol} = ?, ${postedCol} = ?
+       WHERE id = ?`
+    ).run(id, url, text, dryRun ? 1 : 0, error, attempted ? nowISO() : null, postId);
+  };
+
+  return { network, setEnabled, isEnabled, setNext, touchLast, getNextUnposted, recordResult };
 }
 
-/**
- * Record the outcome of a tweet attempt against the post it promotes.
- *
- * A failure is recorded too (as an error, with tweet_posted_at left null) rather than left
- * unmarked, so a transient failure does not retry the same post forever if the underlying
- * cause is not transient — the caller decides whether to leave it eligible for the next tick
- * or to mark it permanently attempted.
- */
-export function recordTweetResult(postId, { tweetId = null, tweetUrl = null, tweetText, dryRun, error = null, attempted = true }) {
-  db.prepare(
-    `UPDATE posts SET
-       tweet_id = ?, tweet_url = ?, tweet_text = ?, tweet_dry_run = ?, tweet_error = ?,
-       tweet_posted_at = ?
-     WHERE id = ?`
-  ).run(
-    tweetId,
-    tweetUrl,
-    tweetText,
-    dryRun ? 1 : 0,
-    error,
-    attempted ? nowISO() : null,
-    postId
-  );
-}
+const twitterOps = makeSocialOps('twitter', {
+  enabledCol: 'twitter_enabled', nextCol: 'next_tweet_at', lastCol: 'last_tweet_at',
+  idCol: 'tweet_id', urlCol: 'tweet_url', textCol: 'tweet_text',
+  dryRunCol: 'tweet_dry_run', errorCol: 'tweet_error', postedCol: 'tweet_posted_at',
+});
+
+const blueskyOps = makeSocialOps('bluesky', {
+  enabledCol: 'bluesky_enabled', nextCol: 'next_skeet_at', lastCol: 'last_skeet_at',
+  idCol: 'skeet_id', urlCol: 'skeet_url', textCol: 'skeet_text',
+  dryRunCol: 'skeet_dry_run', errorCol: 'skeet_error', postedCol: 'skeet_posted_at',
+});
+
+export const setTwitterEnabled = twitterOps.setEnabled;
+export const twitterEnabled = twitterOps.isEnabled;
+export const setNextTweet = twitterOps.setNext;
+export const touchLastTweet = twitterOps.touchLast;
+export const getNextUntweetedPost = twitterOps.getNextUnposted;
+export const recordTweetResult = twitterOps.recordResult;
+
+export const setBlueskyEnabled = blueskyOps.setEnabled;
+export const blueskyEnabled = blueskyOps.isEnabled;
+export const setNextSkeet = blueskyOps.setNext;
+export const touchLastSkeet = blueskyOps.touchLast;
+export const getNextUnskeetedPost = blueskyOps.getNextUnposted;
+export const recordSkeetResult = blueskyOps.recordResult;
 
 export function countStats(agentId) {
   const accepted = db.prepare('SELECT COUNT(*) c FROM posts WHERE agent_id = ?').get(agentId).c;

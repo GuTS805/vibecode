@@ -4,7 +4,7 @@ import TopBar from './components/TopBar';
 import Header from './components/Header';
 import Feed from './components/Feed';
 import StatusPanel from './components/StatusPanel';
-import TwitterPanel from './components/TwitterPanel';
+import SocialPanel from './components/SocialPanel';
 import RejectionsPanel from './components/RejectionsPanel';
 import PersonaPanel from './components/PersonaPanel';
 import InitForm from './components/InitForm';
@@ -52,7 +52,7 @@ export default function App() {
   const [showInit, setShowInit] = useState(false);
   const [busy, setBusy] = useState(false);
   const [lifecycleBusy, setLifecycleBusy] = useState(false);
-  const [twitterBusy, setTwitterBusy] = useState(false);
+  const [socialBusy, setSocialBusy] = useState({ twitter: false, bluesky: false });
   const [stage, setStage] = useState(null);
   const [toast, setToast] = useState(null);
   const [theme, toggleTheme] = useTheme();
@@ -250,26 +250,30 @@ export default function App() {
   }
 
   /**
-   * X posting toggle and manual "tweet now". Independent of handleLifecycle: this agent's
-   * write cycle and its promotion to X are separate switches (see scheduler.js), so a
-   * failure or busy-state in one must not block the other.
+   * Social posting toggle and manual "post now", shared across X and Bluesky. Independent of
+   * handleLifecycle: an agent's write cycle and its promotion to any given network are
+   * separate switches (see scheduler.js), so a failure or busy-state in one network must not
+   * block the agent's writing, its other network, or vice versa — hence per-network busy
+   * flags rather than one shared boolean.
    */
-  async function handleTwitter(action) {
-    if (!activeId || twitterBusy) return;
-    setTwitterBusy(true);
+  async function handleSocial(network, action) {
+    if (!activeId || socialBusy[network]) return;
+    setSocialBusy((b) => ({ ...b, [network]: true }));
+    const label = network === 'twitter' ? 'Tweeting' : 'Bluesky posting';
+    const verb = network === 'twitter' ? 'Tweeted' : 'Posted';
     try {
-      const fn = { enable: api.enableTwitter, disable: api.disableTwitter, tweetNow: api.tweetNow }[action];
-      const result = await fn(activeId);
+      const fns = { enable: api.enableSocial, disable: api.disableSocial, postNow: api.postNowSocial };
+      const result = await fns[action](network, activeId);
       await loadAgentData(activeId, { silent: true });
-      if (action === 'enable') setToast('Tweeting enabled — the oldest unposted post goes out within a minute.');
-      else if (action === 'disable') setToast('Tweeting disabled.');
-      else if (action === 'tweetNow') {
+      if (action === 'enable') setToast(`${label} enabled — the oldest unposted post goes out within a minute.`);
+      else if (action === 'disable') setToast(`${label} disabled.`);
+      else if (action === 'postNow') {
         setToast(
-          result.tweeted
-            ? `${result.dryRun ? '[Dry run] ' : ''}Tweeted.`
+          result.posted
+            ? `${result.dryRun ? '[Dry run] ' : ''}${verb}.`
             : result.reason === 'nothing-to-tweet'
-              ? 'Nothing to tweet yet — no unposted posts.'
-              : `Could not tweet: ${result.error || result.reason}`
+              ? 'Nothing to post yet — no unposted posts.'
+              : `Could not post: ${result.error || result.reason}`
         );
       }
       setTimeout(() => setToast(null), 6000);
@@ -277,7 +281,7 @@ export default function App() {
       setToast(err.message);
       setTimeout(() => setToast(null), 6000);
     } finally {
-      setTwitterBusy(false);
+      setSocialBusy((b) => ({ ...b, [network]: false }));
     }
   }
 
@@ -412,12 +416,22 @@ export default function App() {
 
               <aside className="col-side">
                 <StatusPanel status={status} tick={tick} />
-                <TwitterPanel
-                  twitter={status?.twitter}
-                  onEnable={() => handleTwitter('enable')}
-                  onDisable={() => handleTwitter('disable')}
-                  onTweetNow={() => handleTwitter('tweetNow')}
-                  busy={twitterBusy}
+                <SocialPanel
+                  network="twitter"
+                  status={status?.twitter}
+                  onEnable={() => handleSocial('twitter', 'enable')}
+                  onDisable={() => handleSocial('twitter', 'disable')}
+                  onPostNow={() => handleSocial('twitter', 'postNow')}
+                  busy={socialBusy.twitter}
+                  canAct={isActive}
+                />
+                <SocialPanel
+                  network="bluesky"
+                  status={status?.bluesky}
+                  onEnable={() => handleSocial('bluesky', 'enable')}
+                  onDisable={() => handleSocial('bluesky', 'disable')}
+                  onPostNow={() => handleSocial('bluesky', 'postNow')}
+                  busy={socialBusy.bluesky}
                   canAct={isActive}
                 />
               </aside>

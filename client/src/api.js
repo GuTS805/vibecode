@@ -30,15 +30,19 @@ export const pauseAgent = lifecycle('pause');
 export const resumeAgent = lifecycle('resume');
 export const stopAgent = lifecycle('stop');
 
-/** X (Twitter) posting: opt-in per agent, independent of the write cycle's own lifecycle. */
-export const enableTwitter = (agentId) =>
-  req(`/api/agent/twitter/enable?agentId=${encodeURIComponent(agentId)}`, { method: 'POST' });
-export const disableTwitter = (agentId) =>
-  req(`/api/agent/twitter/disable?agentId=${encodeURIComponent(agentId)}`, { method: 'POST' });
-export const getTwitterStatus = (agentId) =>
-  req(`/api/agent/twitter/status?agentId=${encodeURIComponent(agentId)}`);
-export const tweetNow = (agentId) =>
-  req(`/api/agent/twitter/tweet-now?agentId=${encodeURIComponent(agentId)}`, { method: 'POST' });
+/**
+ * Social posting: opt-in per agent per network, independent of the write cycle's own
+ * lifecycle. X and Bluesky expose identical endpoint shapes under /agent/{network}/..., so
+ * one parameterized helper covers both rather than duplicating four functions per network.
+ */
+export const enableSocial = (network, agentId) =>
+  req(`/api/agent/${network}/enable?agentId=${encodeURIComponent(agentId)}`, { method: 'POST' });
+export const disableSocial = (network, agentId) =>
+  req(`/api/agent/${network}/disable?agentId=${encodeURIComponent(agentId)}`, { method: 'POST' });
+export const getSocialStatus = (network, agentId) =>
+  req(`/api/agent/${network}/status?agentId=${encodeURIComponent(agentId)}`);
+export const postNowSocial = (network, agentId) =>
+  req(`/api/agent/${network}/tweet-now?agentId=${encodeURIComponent(agentId)}`, { method: 'POST' });
 
 /** "2h ago" style relative timestamps. */
 export function relativeTime(iso) {

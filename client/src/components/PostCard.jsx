@@ -182,7 +182,8 @@ export default function PostCard({ post, isNew, author }) {
             </button>
             <span className="post-footer-marks">
               {formatLabel && <span className="post-format-mark">{formatLabel}</span>}
-              <TweetBadge tweet={post.tweet} />
+              <SocialBadge network="twitter" record={post.tweet} />
+              <SocialBadge network="bluesky" record={post.skeet} />
             </span>
           </div>
 
@@ -198,41 +199,50 @@ export default function PostCard({ post, isNew, author }) {
   );
 }
 
-/**
- * Whether and how this post was promoted to X.
- *
- * Three distinct states, not two: a real tweet (a link out), a dry-run tweet (a preview of
- * what would have been sent, since dry run is the honest default until credentials are
- * confirmed working — see twitter.js), and a failed attempt (surfaced rather than hidden,
- * since a silently-failing integration is worse than an absent one). No badge at all when
- * tweeting was never attempted, which is the common case for most posts.
- */
-function TweetBadge({ tweet }) {
-  if (!tweet) return null;
+/** Per-network glyph and verb for the badge — data, not a second copy of the component. */
+const SOCIAL_BADGE = {
+  twitter: { glyph: '𝕏', verb: 'tweeted', failVerb: 'tweet' },
+  bluesky: { glyph: '🦋', verb: 'posted', failVerb: 'post' },
+};
 
-  if (tweet.error) {
+/**
+ * Whether and how this post was promoted to a social network.
+ *
+ * Three distinct states, not two: a real post (a link out), a dry-run post (a preview of what
+ * would have been sent, since dry run is the honest default until credentials are confirmed
+ * working — see twitter.js / bluesky.js), and a failed attempt (surfaced rather than hidden,
+ * since a silently-failing integration is worse than an absent one). No badge at all when
+ * promotion was never attempted, which is the common case for most posts. Renders once per
+ * network that has ever attempted this post — a post can carry both a tweet badge and a
+ * Bluesky badge if both were enabled.
+ */
+function SocialBadge({ network, record }) {
+  if (!record) return null;
+  const { glyph, verb, failVerb } = SOCIAL_BADGE[network];
+
+  if (record.error) {
     return (
-      <span className="tweet-mark tweet-mark-error" title={tweet.error}>
-        ⚠ tweet failed
+      <span className={`tweet-mark tweet-mark-error`} title={record.error}>
+        ⚠ {failVerb} failed
       </span>
     );
   }
-  if (tweet.dryRun) {
+  if (record.dryRun) {
     return (
-      <span className="tweet-mark tweet-mark-dry" title={tweet.text}>
-        𝕏 dry-run preview
+      <span className="tweet-mark tweet-mark-dry" title={record.text}>
+        {glyph} dry-run preview
       </span>
     );
   }
   return (
     <a
       className="tweet-mark tweet-mark-live"
-      href={tweet.url}
+      href={record.url}
       target="_blank"
       rel="noopener noreferrer"
-      title={tweet.text}
+      title={record.text}
     >
-      𝕏 tweeted ↗
+      {glyph} {verb} ↗
     </a>
   );
 }

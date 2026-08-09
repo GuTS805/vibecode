@@ -39,7 +39,7 @@ apart to stay inside the free tier's daily quota (see
 - [Requirement mapping](#requirement-mapping)
 - [Providers: text and images](#providers-text-and-images)
 - [What makes the posts varied](#what-makes-the-posts-varied)
-- [X (Twitter) posting](#x-twitter-posting)
+- [Social posting: X and Bluesky](#social-posting-x-and-bluesky)
 - [Known constraints](#known-constraints)
 
 ---
@@ -455,6 +455,10 @@ button.
 | `GET /api/agent/twitter/status?agentId=…` | Enabled, dry-run, next/last tweet, cadence |
 | `POST /api/agent/twitter/tweet-now?agentId=…` | Tweet the oldest un-promoted post immediately (demo only) |
 | `GET /api/twitter/verify` | Confirm the four X credentials actually authenticate |
+| `POST /api/agent/bluesky/enable` · `/disable` | Same, for Bluesky — independent of the X toggle |
+| `GET /api/agent/bluesky/status?agentId=…` | Same shape as the X status endpoint |
+| `POST /api/agent/bluesky/tweet-now?agentId=…` | Post the oldest un-promoted post to Bluesky immediately |
+| `GET /api/bluesky/verify` | Confirm the handle + app password actually authenticate |
 
 ---
 
@@ -648,7 +652,7 @@ objects fill the frame.
 
 ---
 
-## X (Twitter) posting
+## Social posting: X and Bluesky
 
 Optional and off by default. Any agent can opt in — `POST /api/agent/twitter/enable` — and from
 then on its posts are promoted to an X account on their own cadence, independent of how often
@@ -721,6 +725,42 @@ It does, however, respect the *agent's* lifecycle for manual actions: `POST
 /agent/twitter/tweet-now` on a paused or stopped agent returns `409`, mirroring `/agent/trigger`
 — a stopped agent doing nothing autonomous has to include not tweeting, or "stopped" would only
 mean "stopped writing."
+
+### Bluesky: the free alternative, added after hitting X's billing wall
+
+X's pay-per-usage plan turned out to reject even zero-cost calls without a payment method on
+file (see above), and after adding one, the account still had `$0.00` balance — the card was
+saved, not spent from. Rather than requiring a real purchase to demo social posting at all,
+Bluesky was added as a second, independent network with no billing tier for basic posting.
+
+**Auth is simpler than X's, deliberately.** A handle plus an *app password* (generated in
+Bluesky's settings, distinct from and independently revocable from the account's real login
+password) is exchanged for a session JWT with one `POST` to `com.atproto.server.createSession`
+— no OAuth signing, no redirect flow. `src/bluesky.js` creates a fresh session per post rather
+than caching and refreshing the JWT: at a cadence of hours between posts, the extra login call
+is free in practice and removes an entire class of "was my cached token still valid" bugs.
+
+**The character limit works differently, and composeSkeet() accounts for both differences.**
+Bluesky's limit is 300 *grapheme clusters*, not UTF-16 code units — `Intl.Segmenter` is used
+rather than `.length`, so an emoji or accented character is counted as the one visual character
+it is. And unlike X, Bluesky does not shorten URLs in its count; the link's real length is
+budgeted for directly, which means a post with a very long source URL leaves less room for the
+takeaway than the equivalent tweet would. A clickable link also needs an explicit **facet** — a
+byte-range annotation locating the URL in the text — since Bluesky does not auto-linkify a bare
+URL the way most platforms do; the byte (not character) offsets matter whenever the preceding
+text contains multi-byte characters, and this was verified to round-trip correctly rather than
+assumed.
+
+**X and Bluesky share one scheduler implementation, not two copies of it.** Once Bluesky needed
+the exact same shape as X's promotion logic — its own cadence, oldest-post-first, the
+post-specific-vs-account-level failure distinction — duplicating roughly 150 lines with
+`bluesky` swapped in for `twitter` was the wrong move, especially with a third network
+(Mastodon) genuinely on the table as a future option. `makeSocialScheduler()` in
+`scheduler.js` and `makeSocialOps()` in `db.js` each take a small config object (env var
+prefix, DB column names, the network's post/compose functions) and return the full set of
+operations; `SocialPanel.jsx` and the `SocialBadge` component in `PostCard.jsx` do the same on
+the frontend. Adding a network now means supplying its config, not re-deriving the scheduling
+logic a third time.
 
 ## Known constraints
 
